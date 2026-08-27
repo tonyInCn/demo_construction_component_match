@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import warnings
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -18,6 +19,9 @@ logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("diffusers").setLevel(logging.ERROR)
 logging.getLogger("PIL").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
+warnings.filterwarnings("ignore", message=".*slow image processor.*")
+warnings.filterwarnings("ignore", message=".*pipelines sequentially.*")
 
 
 class PipelineManager:

@@ -8,6 +8,7 @@ import numpy as np
 from backend.config import (
     CLIP_MODEL_ID,
     CONFIDENCE_THRESHOLD,
+    INFERENCE_MAX_SIDE,
     MAX_SIDE,
     MODEL_ID,
     IOU_THRESHOLD,
@@ -139,7 +140,7 @@ class ModelDetector:
         try:
             from transformers import CLIPModel, CLIPProcessor
             model = CLIPModel.from_pretrained(CLIP_MODEL_ID)
-            processor = CLIPProcessor.from_pretrained(CLIP_MODEL_ID)
+            processor = CLIPProcessor.from_pretrained(CLIP_MODEL_ID, use_fast=True)
             model = model.to(self.device)
             model.eval()
             logger.info(f"CLIP 加载成功: {CLIP_MODEL_ID}")
@@ -169,6 +170,37 @@ class ModelDetector:
         detections = self._apply_nms(detections)
         return detections
 
+    def detect_batch(self, frames, work_regions=None, step_callback=None):
+        if work_regions is None:
+            work_regions = [None] * len(frames)
+
+        if step_callback:
+            step_callback("GroundingDINO检测")
+
+        h_list = [f.shape[0] for f in frames]
+        w_list = [f.shape[1] for f in frames]
+
+        batch_dino = self._detect_grounding_dino_batch(frames, w_list, h_list)
+
+        all_detections = []
+        for i, frame in enumerate(frames):
+            detections = list(batch_dino[i]) if i < len(batch_dino) else []
+
+            if step_callback and i == 0:
+                step_callback("传统CV检测")
+            detections.extend(self._detect_traditional_cv(frame, w_list[i], h_list[i]))
+
+            if len(detections) == 0:
+                all_detections.append([])
+                continue
+
+            if step_callback and i == 0:
+                step_callback("NMS融合去重")
+            detections = self._apply_nms(detections)
+            all_detections.append(detections)
+
+        return all_detections
+
     def _detect_grounding_dino(self, frame: np.ndarray, w: int, h: int):
         results = []
         if self.grounding_dino is None:
@@ -177,8 +209,8 @@ class ModelDetector:
         try:
             import torch
             scale = 1.0
-            if max(h, w) > MAX_SIDE:
-                scale = MAX_SIDE / max(h, w)
+            if max(h, w) > INFERENCE_MAX_SIDE:
+                scale = INFERENCE_MAX_SIDE / max(h, w)
                 frame_small = cv2.resize(frame, (int(w * scale), int(h * scale)))
             else:
                 frame_small = frame
@@ -231,6 +263,87 @@ class ModelDetector:
             logger.warning(f"GroundingDINO 推理异常: {e}")
 
         return results
+
+    def _detect_grounding_dino_batch(self, frames, w_list, h_list):
+        if self.grounding_dino is None:
+            return [[] for _ in frames]
+
+        try:
+            import torch
+            from PIL import Image
+
+            pil_images = []
+            scales = []
+            for frame, w, h in zip(frames, w_list, h_list):
+                scale = 1.0
+                if max(h, w) > INFERENCE_MAX_SIDE:
+                    scale = INFERENCE_MAX_SIDE / max(h, w)
+                    frame_small = cv2.resize(frame, (int(w * scale), int(h * scale)))
+                else:
+                    frame_small = frame
+                scales.append(scale)
+                pil_images.append(Image.fromarray(cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGB)))
+
+            prompts = GROUNDING_PROMPTS
+            try:
+                outputs = self.grounding_dino(
+                    images=pil_images,
+                    candidate_labels=prompts,
+                )
+            except Exception:
+                try:
+                    prompt_text = ", ".join(prompts)
+                    outputs = self.grounding_dino(
+                        images=pil_images,
+                        text=prompt_text,
+                    )
+                except Exception:
+                    outputs = []
+
+            batch_results = []
+            for frame_idx in range(len(frames)):
+                results = []
+                if frame_idx < len(outputs) and isinstance(outputs[frame_idx], list):
+                    detections = outputs[frame_idx]
+                elif isinstance(outputs, list) and len(outputs) == len(frames):
+                    det_item = outputs[frame_idx]
+                    detections = det_item if isinstance(det_item, list) else [det_item]
+                else:
+                    detections = []
+
+                for det in detections:
+                    score = float(det.get("score", 0))
+                    if score < 0.3:
+                        continue
+                    label = det.get("label", "unknown")
+                    box = det.get("box", {})
+                    x1 = float(box.get("xmin", 0))
+                    y1 = float(box.get("ymin", 0))
+                    x2 = float(box.get("xmax", 0))
+                    y2 = float(box.get("ymax", 0))
+                    scale = scales[frame_idx]
+                    if scale != 1.0:
+                        x1 /= scale
+                        y1 /= scale
+                        x2 /= scale
+                        y2 /= scale
+                    results.append({
+                        "bbox": [int(x1), int(y1), int(x2 - x1), int(y2 - y1)],
+                        "confidence": score,
+                        "label": label,
+                        "detector": "grounding_dino",
+                    })
+                batch_results.append(results)
+
+            del outputs, pil_images
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+
+            return batch_results
+        except Exception as e:
+            logger.warning(f"GroundingDINO 批量推理异常: {e}")
+            return [self._detect_grounding_dino(f, w_list[i], h_list[i]) for i, f in enumerate(frames)]
 
     def _detect_traditional_cv(self, frame: np.ndarray, w: int, h: int):
         results = []

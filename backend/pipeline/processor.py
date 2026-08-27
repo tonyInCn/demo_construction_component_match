@@ -6,7 +6,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from backend.config import ANNOTATED_DIR, ROIS_DIR
+from backend.config import ANNOTATED_DIR, BATCH_SIZE, FRAME_SAMPLE_RATE, ROIS_DIR
 from backend.logger import get_logger
 from backend.pipeline.model_detector import ModelDetector
 
@@ -74,20 +74,102 @@ class Processor:
 
         logger.info(f"流水线 {pipeline_id} 后台线程启动, 视频: {pipeline['video_path']}, 总帧数: {pipeline['total_frames']}")
 
+        batch_frames = []
+        batch_nums = []
+
+        def _flush_batch():
+            nonlocal batch_frames, batch_nums
+            if not batch_frames:
+                return
+            self._process_batch(pipeline_id, batch_frames, batch_nums)
+            batch_frames = []
+            batch_nums = []
+
         while pipeline["status"] == "running":
-            try:
-                result = self.process_frame(pipeline_id)
-                if result is None:
-                    logger.info(f"流水线 {pipeline_id} 处理循环结束")
-                    break
-            except Exception as e:
-                logger.error(f"处理帧异常: {e}", exc_info=True)
-                pipeline["status"] = "error"
+            ret, frame = pipeline["cap"].read()
+            if not ret:
                 break
+
+            pipeline["current_frame"] += 1
+            frame_num = pipeline["current_frame"]
+
+            if frame_num % FRAME_SAMPLE_RATE != 0 and frame_num != 1:
+                continue
+
+            batch_frames.append(frame)
+            batch_nums.append(frame_num)
+
+            if len(batch_frames) >= BATCH_SIZE:
+                _flush_batch()
+
+        if batch_frames:
+            _flush_batch()
 
         if pipeline["status"] == "running":
             pipeline["status"] = "completed"
             logger.info(f"流水线 {pipeline_id} 处理完成, 共 {pipeline['current_frame']} 帧")
+
+    def _process_batch(self, pipeline_id: str, frames, frame_nums):
+        pipeline = self._pipelines.get(pipeline_id)
+        if pipeline is None or pipeline["status"] != "running":
+            return
+
+        logger.info(f"批量处理 {len(frames)} 帧 (帧号: {frame_nums[0]}-{frame_nums[-1]})...")
+
+        pipeline["last_step"] = "吊机检测"
+        work_regions = []
+        for frame in frames:
+            wr = self._detect_crane(frame)
+            work_regions.append(wr)
+
+        pipeline["last_step"] = "确定检测区域"
+
+        pipeline["last_step"] = "多方法构件检测"
+
+        def _step_cb(step_name):
+            pipeline["last_step"] = step_name
+
+        all_detections = self.model_detector.detect_batch(frames, work_regions, step_callback=_step_cb)
+        pipeline["last_step"] = "多方法构件检测完成"
+
+        for i, frame in enumerate(frames):
+            detections = all_detections[i] if i < len(all_detections) else []
+            frame_num = frame_nums[i]
+
+            tracked = []
+            for det in detections:
+                track_id = str(uuid.uuid4())[:8]
+                det["track_id"] = track_id
+
+                pipeline["last_step"] = "构件匹配与判定"
+                match = self.model_detector.match_component(frame, det["bbox"])
+                if match:
+                    det["class_name"] = match["component_name"]
+                    det["confidence"] = match["confidence"]
+                    det["component_id"] = match["component_id"]
+                    pipeline["unique_components"][match["component_id"]] = match
+                else:
+                    det["class_name"] = det.get("label", "未知构件")
+
+                tracked.append(det)
+
+            pipeline["detections_count"] = len(pipeline["unique_components"])
+
+            annotated_frame = self._annotate_frame(frame.copy(), tracked, frame_num)
+            self._save_annotated_frame(annotated_frame, pipeline_id, frame_num)
+            image_filename = f"{pipeline_id}_frame_{frame_num:06d}.jpg"
+
+            pipeline["frame_results"].append({
+                "frame": frame_num,
+                "image_filename": image_filename,
+                "detections": tracked,
+            })
+
+            if len(pipeline["frame_results"]) > 30:
+                pipeline["frame_results"] = pipeline["frame_results"][-30:]
+
+        pipeline["last_step"] = "构件匹配与判定完成"
+        logger.info(f"批量处理完成, 共处理 {len(frames)} 帧")
 
     def stop_pipeline(self, pipeline_id: str):
         pipeline = self._pipelines.get(pipeline_id)
@@ -129,78 +211,10 @@ class Processor:
             latest = results[-1]
             return {
                 "frame": latest["frame"],
+                "image_filename": latest.get("image_filename"),
                 "detections": latest["detections"],
             }
-        return {"frame": 0, "detections": []}
-
-    def process_frame(self, pipeline_id: str):
-        pipeline = self._pipelines.get(pipeline_id)
-        if pipeline is None or pipeline["status"] != "running":
-            return None
-
-        ret, frame = pipeline["cap"].read()
-        if not ret:
-            pipeline["status"] = "completed"
-            logger.info(f"流水线 {pipeline_id} 视频读取完成, 共 {pipeline['current_frame']} 帧")
-            return None
-
-        pipeline["current_frame"] += 1
-        frame_num = pipeline["current_frame"]
-
-        if frame_num <= 3 or frame_num % 30 == 0:
-            logger.info(f"处理第 {frame_num} 帧...")
-
-        detections = []
-
-        pipeline["last_step"] = "吊机检测"
-        work_region = self._detect_crane(frame)
-
-        pipeline["last_step"] = "确定检测区域"
-        if work_region is not None:
-            pass
-
-        pipeline["last_step"] = "多方法构件检测"
-
-        def _step_cb(step_name):
-            pipeline["last_step"] = step_name
-
-        detections = self.model_detector.detect(frame, work_region, step_callback=_step_cb)
-        pipeline["last_step"] = "多方法构件检测完成"
-
-        tracked = []
-        for det in detections:
-            track_id = str(uuid.uuid4())[:8]
-            det["track_id"] = track_id
-
-            pipeline["last_step"] = "构件匹配与判定"
-            match = self.model_detector.match_component(frame, det["bbox"])
-            if match:
-                det["class_name"] = match["component_name"]
-                det["confidence"] = match["confidence"]
-                det["component_id"] = match["component_id"]
-                pipeline["unique_components"][match["component_id"]] = match
-            else:
-                det["class_name"] = det.get("label", "未知构件")
-
-            tracked.append(det)
-
-        pipeline["detections_count"] = len(pipeline["unique_components"])
-
-        annotated_frame = self._annotate_frame(frame.copy(), tracked, frame_num)
-        self._save_annotated_frame(annotated_frame, pipeline_id, frame_num)
-
-        pipeline["frame_results"].append({
-            "frame": frame_num,
-            "detections": tracked,
-        })
-
-        if len(pipeline["frame_results"]) > 30:
-            pipeline["frame_results"] = pipeline["frame_results"][-30:]
-
-        if frame_num <= 3 or frame_num % 30 == 0:
-            logger.info(f"第 {frame_num} 帧处理完成, 检测到 {len(tracked)} 个构件")
-
-        return annotated_frame
+        return {"frame": 0, "image_filename": None, "detections": []}
 
     def _detect_crane(self, frame: np.ndarray) -> Optional[np.ndarray]:
         try:

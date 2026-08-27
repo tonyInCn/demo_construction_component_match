@@ -93,18 +93,24 @@
                     <h3 style="font-size:0.9rem;color:#94a3b8;margin-bottom:12px;">检测结果</h3>
                     <table class="detections-table" id="detectionsTable">
                         <tr>
+                            <th>缩略图</th>
                             <th>ID</th>
                             <th>构件名称</th>
                             <th>置信度</th>
                             <th>检测器</th>
                         </tr>
                         <tr>
-                            <td colspan="4" style="text-align:center;color:#64748b;padding:20px;">暂无检测结果</td>
+                            <td colspan="5" style="text-align:center;color:#64748b;padding:20px;">暂无检测结果</td>
                         </tr>
                     </table>
                 </div>
             </div>
         </div>
+    </div>
+
+    <div class="lightbox" id="lightbox" style="display:none;">
+        <span class="lightbox-close" id="lightboxClose">&times;</span>
+        <img class="lightbox-img" id="lightboxImg" src="" alt="放大预览">
     </div>
 
     <script src="/js/api.js"></script>

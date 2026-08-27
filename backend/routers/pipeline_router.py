@@ -8,6 +8,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel
 
 from backend.config import (
+    ANNOTATED_DIR,
     MAX_FILE_SIZE,
     SUPPORTED_EXTENSIONS,
     UPLOAD_DIR,
@@ -141,6 +142,21 @@ async def get_frame_results(pipeline_id: str):
     if manager is None:
         raise HTTPException(status_code=500, detail="Pipeline 未初始化")
     return manager.processor.get_frame_results(pipeline_id)
+
+
+@router.get("/annotated_image")
+async def get_annotated_image(filename: str):
+    from fastapi.responses import FileResponse
+
+    safe_name = Path(filename).name
+    path = ANNOTATED_DIR / safe_name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="图片不存在")
+    return FileResponse(
+        path=str(path),
+        media_type="image/jpeg",
+        filename=safe_name,
+    )
 
 
 @router.get("/stream_video")

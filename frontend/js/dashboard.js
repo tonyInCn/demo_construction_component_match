@@ -18,6 +18,7 @@ let state = {
     resultsPoller: null,
     completedSteps: new Set(),
     currentStep: null,
+    currentImageFilename: null,
 };
 
 const els = {
@@ -44,6 +45,9 @@ const els = {
     uniqueCount: document.getElementById('uniqueCount'),
     currentFps: document.getElementById('currentFps'),
     elapsedTime: document.getElementById('elapsedTime'),
+    lightbox: document.getElementById('lightbox'),
+    lightboxImg: document.getElementById('lightboxImg'),
+    lightboxClose: document.getElementById('lightboxClose'),
 };
 
 async function init() {
@@ -275,7 +279,8 @@ function startResultsPolling() {
 
         try {
             const results = await Api.getFrameResults(state.pipelineId);
-            renderDetections(results.detections || []);
+            state.currentImageFilename = results.image_filename || null;
+            renderDetections(results.detections || [], results.image_filename);
         } catch (e) {
             console.error('获取结果失败:', e);
         }
@@ -311,17 +316,18 @@ function updateProgress(status) {
     }
 }
 
-function renderDetections(detections) {
+function renderDetections(detections, imageFilename) {
     if (detections.length === 0) {
         els.detectionsTable.innerHTML = `
             <tr>
+                <th>缩略图</th>
                 <th>ID</th>
                 <th>构件名称</th>
                 <th>置信度</th>
                 <th>检测器</th>
             </tr>
             <tr>
-                <td colspan="4" style="text-align:center;color:#64748b;padding:20px;">暂无检测结果</td>
+                <td colspan="5" style="text-align:center;color:#64748b;padding:20px;">暂无检测结果</td>
             </tr>
         `;
         return;
@@ -329,6 +335,7 @@ function renderDetections(detections) {
 
     const header = `
         <tr>
+            <th>缩略图</th>
             <th>ID</th>
             <th>构件名称</th>
             <th>置信度</th>
@@ -336,12 +343,20 @@ function renderDetections(detections) {
         </tr>
     `;
 
+    const thumbUrl = imageFilename ? `/api/pipeline/annotated_image?filename=${encodeURIComponent(imageFilename)}` : null;
+
     const rows = detections.map(d => {
         const confidenceClass = d.confidence >= 0.7 ? 'badge-green' : (d.confidence >= 0.5 ? 'badge-yellow' : 'badge-red');
         const detectorClass = d.detector === 'grounding_dino' ? 'badge-blue' : 'badge-yellow';
         const detectorName = d.detector === 'grounding_dino' ? 'GroundingDINO' : (d.detector === 'traditional_cv' ? '传统CV' : d.detector);
+
+        const thumbCell = thumbUrl
+            ? `<td><img class="detection-thumbnail" src="${thumbUrl}" alt="缩略图" data-fullsrc="${thumbUrl}"></td>`
+            : `<td><div class="detection-thumbnail-placeholder">无</div></td>`;
+
         return `
             <tr>
+                ${thumbCell}
                 <td>${d.track_id || '-'}</td>
                 <td>${d.class_name || d.label || '-'}</td>
                 <td><span class="badge ${confidenceClass}">${(d.confidence * 100).toFixed(1)}%</span></td>
@@ -351,6 +366,30 @@ function renderDetections(detections) {
     }).join('');
 
     els.detectionsTable.innerHTML = header + rows;
+
+    els.detectionsTable.querySelectorAll('.detection-thumbnail').forEach(img => {
+        img.addEventListener('click', () => {
+            const fullSrc = img.dataset.fullsrc || img.src;
+            els.lightboxImg.src = fullSrc;
+            els.lightbox.style.display = 'flex';
+        });
+    });
 }
+
+els.lightboxClose.addEventListener('click', () => {
+    els.lightbox.style.display = 'none';
+});
+
+els.lightbox.addEventListener('click', (e) => {
+    if (e.target === els.lightbox) {
+        els.lightbox.style.display = 'none';
+    }
+});
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && els.lightbox.style.display === 'flex') {
+        els.lightbox.style.display = 'none';
+    }
+});
 
 init();

@@ -1,0 +1,663 @@
+[1mdiff --git a/backend/config.py b/backend/config.py[m
+[1mindex b79fa09..9d6951f 100644[m
+[1m--- a/backend/config.py[m
+[1m+++ b/backend/config.py[m
+[36m@@ -27,6 +27,10 @@[m [mMAX_SIDE = 640[m
+ IOU_THRESHOLD = 0.5[m
+ CONFIDENCE_THRESHOLD = 0.45[m
+ [m
+[32m+[m[32mFRAME_SAMPLE_RATE = 5[m
+[32m+[m[32mINFERENCE_MAX_SIDE = 480[m
+[32m+[m[32mBATCH_SIZE = 8[m
+[32m+[m
+ SUPPORTED_EXTENSIONS = {[m
+     ".mp4", ".avi", ".mov", ".mkv", ".wmv",[m
+     ".flv", ".webm", ".m4v", ".mpg", ".mpeg"[m
+[1mdiff --git a/backend/main.py b/backend/main.py[m
+[1mindex 51e3eb9..78ebe6e 100644[m
+[1m--- a/backend/main.py[m
+[1m+++ b/backend/main.py[m
+[36m@@ -1,5 +1,6 @@[m
+ import asyncio[m
+ import logging[m
+[32m+[m[32mimport warnings[m
+ from contextlib import asynccontextmanager[m
+ [m
+ from fastapi import FastAPI[m
+[36m@@ -18,6 +19,9 @@[m [mlogging.getLogger("asyncio").setLevel(logging.CRITICAL)[m
+ logging.getLogger("transformers").setLevel(logging.ERROR)[m
+ logging.getLogger("diffusers").setLevel(logging.ERROR)[m
+ logging.getLogger("PIL").setLevel(logging.ERROR)[m
+[32m+[m[32mwarnings.filterwarnings("ignore", category=FutureWarning, module="transformers")[m
+[32m+[m[32mwarnings.filterwarnings("ignore", message=".*slow image processor.*")[m
+[32m+[m[32mwarnings.filterwarnings("ignore", message=".*pipelines sequentially.*")[m
+ [m
+ [m
+ class PipelineManager:[m
+[1mdiff --git a/backend/pipeline/model_detector.py b/backend/pipeline/model_detector.py[m
+[1mindex 7646b0f..6e7710b 100644[m
+[1m--- a/backend/pipeline/model_detector.py[m
+[1m+++ b/backend/pipeline/model_detector.py[m
+[36m@@ -8,6 +8,7 @@[m [mimport numpy as np[m
+ from backend.config import ([m
+     CLIP_MODEL_ID,[m
+     CONFIDENCE_THRESHOLD,[m
+[32m+[m[32m    INFERENCE_MAX_SIDE,[m
+     MAX_SIDE,[m
+     MODEL_ID,[m
+     IOU_THRESHOLD,[m
+[36m@@ -139,7 +140,7 @@[m [mclass ModelDetector:[m
+         try:[m
+             from transformers import CLIPModel, CLIPProcessor[m
+             model = CLIPModel.from_pretrained(CLIP_MODEL_ID)[m
+[31m-            processor = CLIPProcessor.from_pretrained(CLIP_MODEL_ID)[m
+[32m+[m[32m            processor = CLIPProcessor.from_pretrained(CLIP_MODEL_ID, use_fast=True)[m
+             model = model.to(self.device)[m
+             model.eval()[m
+             logger.info(f"CLIP 加载成功: {CLIP_MODEL_ID}")[m
+[36m@@ -169,6 +170,37 @@[m [mclass ModelDetector:[m
+         detections = self._apply_nms(detections)[m
+         return detections[m
+ [m
+[32m+[m[32m    def detect_batch(self, frames, work_regions=None, step_callback=None):[m
+[32m+[m[32m        if work_regions is None:[m
+[32m+[m[32m            work_regions = [None] * len(frames)[m
+[32m+[m
+[32m+[m[32m        if step_callback:[m
+[32m+[m[32m            step_callback("GroundingDINO检测")[m
+[32m+[m
+[32m+[m[32m        h_list = [f.shape[0] for f in frames][m
+[32m+[m[32m        w_list = [f.shape[1] for f in frames][m
+[32m+[m
+[32m+[m[32m        batch_dino = self._detect_grounding_dino_batch(frames, w_list, h_list)[m
+[32m+[m
+[32m+[m[32m        all_detections = [][m
+[32m+[m[32m        for i, frame in enumerate(frames):[m
+[32m+[m[32m            detections = list(batch_dino[i]) if i < len(batch_dino) else [][m
+[32m+[m
+[32m+[m[32m            if step_callback and i == 0:[m
+[32m+[m[32m                step_callback("传统CV检测")[m
+[32m+[m[32m            detections.extend(self._detect_traditional_cv(frame, w_list[i], h_list[i]))[m
+[32m+[m
+[32m+[m[32m            if len(detections) == 0:[m
+[32m+[m[32m                all_detections.append([])[m
+[32m+[m[32m                continue[m
+[32m+[m
+[32m+[m[32m            if step_callback and i == 0:[m
+[32m+[m[32m                step_callback("NMS融合去重")[m
+[32m+[m[32m            detections = self._apply_nms(detections)[m
+[32m+[m[32m            all_detections.append(detections)[m
+[32m+[m
+[32m+[m[32m        return all_detections[m
+[32m+[m
+     def _detect_grounding_dino(self, frame: np.ndarray, w: int, h: int):[m
+         results = [][m
+         if self.grounding_dino is None:[m
+[36m@@ -177,8 +209,8 @@[m [mclass ModelDetector:[m
+         try:[m
+             import torch[m
+             scale = 1.0[m
+[31m-            if max(h, w) > MAX_SIDE:[m
+[31m-                scale = MAX_SIDE / max(h, w)[m
+[32m+[m[32m            if max(h, w) > INFERENCE_MAX_SIDE:[m
+[32m+[m[32m                scale = INFERENCE_MAX_SIDE / max(h, w)[m
+                 frame_small = cv2.resize(frame, (int(w * scale), int(h * scale)))[m
+             else:[m
+                 frame_small = frame[m
+[36m@@ -232,6 +264,87 @@[m [mclass ModelDetector:[m
+ [m
+         return results[m
+ [m
+[32m+[m[32m    def _detect_grounding_dino_batch(self, frames, w_list, h_list):[m
+[32m+[m[32m        if self.grounding_dino is None:[m
+[32m+[m[32m            return [[] for _ in frames][m
+[32m+[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            import torch[m
+[32m+[m[32m            from PIL import Image[m
+[32m+[m
+[32m+[m[32m            pil_images = [][m
+[32m+[m[32m            scales = [][m
+[32m+[m[32m            for frame, w, h in zip(frames, w_list, h_list):[m
+[32m+[m[32m                scale = 1.0[m
+[32m+[m[32m                if max(h, w) > INFERENCE_MAX_SIDE:[m
+[32m+[m[32m                    scale = INFERENCE_MAX_SIDE / max(h, w)[m
+[32m+[m[32m                    frame_small = cv2.resize(frame, (int(w * scale), int(h * scale)))[m
+[32m+[m[32m                else:[m
+[32m+[m[32m                    frame_small = frame[m
+[32m+[m[32m                scales.append(scale)[m
+[32m+[m[32m                pil_images.append(Image.fromarray(cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGB)))[m
+[32m+[m
+[32m+[m[32m            prompts = GROUNDING_PROMPTS[m
+[32m+[m[32m            try:[m
+[32m+[m[32m                outputs = self.grounding_dino([m
+[32m+[m[32m                    images=pil_images,[m
+[32m+[m[32m                    candidate_labels=prompts,[m
+[32m+[m[32m                )[m
+[32m+[m[32m            except Exception:[m
+[32m+[m[32m                try:[m
+[32m+[m[32m                    prompt_text = ", ".join(prompts)[m
+[32m+[m[32m                    outputs = self.grounding_dino([m
+[32m+[m[32m                        images=pil_images,[m
+[32m+[m[32m                        text=prompt_text,[m
+[32m+[m[32m                    )[m
+[32m+[m[32m                except Exception:[m
+[32m+[m[32m                    outputs = [][m
+[32m+[m
+[32m+[m[32m            batch_results = [][m
+[32m+[m[32m            for frame_idx in range(len(frames)):[m
+[32m+[m[32m                results = [][m
+[32m+[m[32m                if frame_idx < len(outputs) and isinstance(outputs[frame_idx], list):[m
+[32m+[m[32m                    detections = outputs[frame_idx][m
+[32m+[m[32m                elif isinstance(outputs, list) and len(outputs) == len(frames):[m
+[32m+[m[32m                    det_item = outputs[frame_idx][m
+[32m+[m[32m                    detections = det_item if isinstance(det_item, list) else [det_item][m
+[32m+[m[32m                else:[m
+[32m+[m[32m                    detections = [][m
+[32m+[m
+[32m+[m[32m                for det in detections:[m
+[32m+[m[32m                    score = float(det.get("score", 0))[m
+[32m+[m[32m                    if score < 0.3:[m
+[32m+[m[32m                        continue[m
+[32m+[m[32m                    label = det.get("label", "unknown")[m
+[32m+[m[32m                    box = det.get("box", {})[m
+[32m+[m[32m                    x1 = float(box.get("xmin", 0))[m
+[32m+[m[32m                    y1 = float(box.get("ymin", 0))[m
+[32m+[m[32m                    x2 = float(box.get("xmax", 0))[m
+[32m+[m[32m                    y2 = float(box.get("ymax", 0))[m
+[32m+[m[32m                    scale = scales[frame_idx][m
+[32m+[m[32m                    if scale != 1.0:[m
+[32m+[m[32m                        x1 /= scale[m
+[32m+[m[32m                        y1 /= scale[m
+[32m+[m[32m                        x2 /= scale[m
+[32m+[m[32m                        y2 /= scale[m
+[32m+[m[32m                    results.append({[m
+[32m+[m[32m                        "bbox": [int(x1), int(y1), int(x2 - x1), int(y2 - y1)],[m
+[32m+[m[32m                        "confidence": score,[m
+[32m+[m[32m                        "label": label,[m
+[32m+[m[32m                        "detector": "grounding_dino",[m
+[32m+[m[32m                    })[m
+[32m+[m[32m                batch_results.append(results)[m
+[32m+[m
+[32m+[m[32m            del outputs, pil_images[m
+[32m+[m[32m            if torch.cuda.is_available():[m
+[32m+[m[32m                torch.cuda.synchronize()[m
+[32m+[m[32m                torch.cuda.empty_cache()[m
+[32m+[m
+[32m+[m[32m            return batch_results[m
+[32m+[m[32m        except Exception as e:[m
+[32m+[m[32m            logger.warning(f"GroundingDINO 批量推理异常: {e}")[m
+[32m+[m[32m            return [self._detect_grounding_dino(f, w_list[i], h_list[i]) for i, f in enumerate(frames)][m
+[32m+[m
+     def _detect_traditional_cv(self, frame: np.ndarray, w: int, h: int):[m
+         results = [][m
+         try:[m
+[1mdiff --git a/backend/pipeline/processor.py b/backend/pipeline/processor.py[m
+[1mindex e148d65..015eed6 100644[m
+[1m--- a/backend/pipeline/processor.py[m
+[1m+++ b/backend/pipeline/processor.py[m
+[36m@@ -6,7 +6,7 @@[m [mfrom typing import Optional[m
+ import cv2[m
+ import numpy as np[m
+ [m
+[31m-from backend.config import ANNOTATED_DIR, ROIS_DIR[m
+[32m+[m[32mfrom backend.config import ANNOTATED_DIR, BATCH_SIZE, FRAME_SAMPLE_RATE, ROIS_DIR[m
+ from backend.logger import get_logger[m
+ from backend.pipeline.model_detector import ModelDetector[m
+ [m
+[36m@@ -74,21 +74,103 @@[m [mclass Processor:[m
+ [m
+         logger.info(f"流水线 {pipeline_id} 后台线程启动, 视频: {pipeline['video_path']}, 总帧数: {pipeline['total_frames']}")[m
+ [m
+[32m+[m[32m        batch_frames = [][m
+[32m+[m[32m        batch_nums = [][m
+[32m+[m
+[32m+[m[32m        def _flush_batch():[m
+[32m+[m[32m            nonlocal batch_frames, batch_nums[m
+[32m+[m[32m            if not batch_frames:[m
+[32m+[m[32m                return[m
+[32m+[m[32m            self._process_batch(pipeline_id, batch_frames, batch_nums)[m
+[32m+[m[32m            batch_frames = [][m
+[32m+[m[32m            batch_nums = [][m
+[32m+[m
+         while pipeline["status"] == "running":[m
+[31m-            try:[m
+[31m-                result = self.process_frame(pipeline_id)[m
+[31m-                if result is None:[m
+[31m-                    logger.info(f"流水线 {pipeline_id} 处理循环结束")[m
+[31m-                    break[m
+[31m-            except Exception as e:[m
+[31m-                logger.error(f"处理帧异常: {e}", exc_info=True)[m
+[31m-                pipeline["status"] = "error"[m
+[32m+[m[32m            ret, frame = pipeline["cap"].read()[m
+[32m+[m[32m            if not ret:[m
+                 break[m
+ [m
+[32m+[m[32m            pipeline["current_frame"] += 1[m
+[32m+[m[32m            frame_num = pipeline["current_frame"][m
+[32m+[m
+[32m+[m[32m            if frame_num % FRAME_SAMPLE_RATE != 0 and frame_num != 1:[m
+[32m+[m[32m                continue[m
+[32m+[m
+[32m+[m[32m            batch_frames.append(frame)[m
+[32m+[m[32m            batch_nums.append(frame_num)[m
+[32m+[m
+[32m+[m[32m            if len(batch_frames) >= BATCH_SIZE:[m
+[32m+[m[32m                _flush_batch()[m
+[32m+[m
+[32m+[m[32m        if batch_frames:[m
+[32m+[m[32m            _flush_batch()[m
+[32m+[m
+         if pipeline["status"] == "running":[m
+             pipeline["status"] = "completed"[m
+             logger.info(f"流水线 {pipeline_id} 处理完成, 共 {pipeline['current_frame']} 帧")[m
+ [m
+[32m+[m[32m    def _process_batch(self, pipeline_id: str, frames, frame_nums):[m
+[32m+[m[32m        pipeline = self._pipelines.get(pipeline_id)[m
+[32m+[m[32m        if pipeline is None or pipeline["status"] != "running":[m
+[32m+[m[32m            return[m
+[32m+[m
+[32m+[m[32m        logger.info(f"批量处理 {len(frames)} 帧 (帧号: {frame_nums[0]}-{frame_nums[-1]})...")[m
+[32m+[m
+[32m+[m[32m        pipeline["last_step"] = "吊机检测"[m
+[32m+[m[32m        work_regions = [][m
+[32m+[m[32m        for frame in frames:[m
+[32m+[m[32m            wr = self._detect_crane(frame)[m
+[32m+[m[32m            work_regions.append(wr)[m
+[32m+[m
+[32m+[m[32m        pipeline["last_step"] = "确定检测区域"[m
+[32m+[m
+[32m+[m[32m        pipeline["last_step"] = "多方法构件检测"[m
+[32m+[m
+[32m+[m[32m        def _step_cb(step_name):[m
+[32m+[m[32m            pipeline["last_step"] = step_name[m
+[32m+[m
+[32m+[m[32m        all_detections = self.model_detector.detect_batch(frames, work_regions, step_callback=_step_cb)[m
+[32m+[m[32m        pipeline["last_step"] = "多方法构件检测完成"[m
+[32m+[m
+[32m+[m[32m        for i, frame in enumerate(frames):[m
+[32m+[m[32m            detections = all_detections[i] if i < len(all_detections) else [][m
+[32m+[m[32m            frame_num = frame_nums[i][m
+[32m+[m
+[32m+[m[32m            tracked = [][m
+[32m+[m[32m            for det in detections:[m
+[32m+[m[32m                track_id = str(uuid.uuid4())[:8][m
+[32m+[m[32m                det["track_id"] = track_id[m
+[32m+[m
+[32m+[m[32m                pipeline["last_step"] = "构件匹配与判定"[m
+[32m+[m[32m                match = self.model_detector.match_component(frame, det["bbox"])[m
+[32m+[m[32m                if match:[m
+[32m+[m[32m                    det["class_name"] = match["component_name"][m
+[32m+[m[32m                    det["confidence"] = match["confidence"][m
+[32m+[m[32m                    det["component_id"] = match["component_id"][m
+[32m+[m[32m                    pipeline["unique_components"][match["component_id"]] = match[m
+[32m+[m[32m                else:[m
+[32m+[m[32m                    det["class_name"] = det.get("label", "未知构件")[m
+[32m+[m
+[32m+[m[32m                tracked.append(det)[m
+[32m+[m
+[32m+[m[32m            pipeline["detections_count"] = len(pipeline["unique_components"])[m
+[32m+[m
+[32m+[m[32m            annotated_frame = self._annotate_frame(frame.copy(), tracked, frame_num)[m
+[32m+[m[32m            self._save_annotated_frame(annotated_frame, pipeline_id, frame_num)[m
+[32m+[m[32m            image_filename = f"{pipeline_id}_frame_{frame_num:06d}.jpg"[m
+[32m+[m
+[32m+[m[32m            pipeline["frame_results"].append({[m
+[32m+[m[32m                "frame": frame_num,[m
+[32m+[m[32m                "image_filename": image_filename,[m
+[32m+[m[32m                "detections": tracked,[m
+[32m+[m[32m            })[m
+[32m+[m
+[32m+[m[32m            if len(pipeline["frame_results"]) > 30:[m
+[32m+[m[32m                pipeline["frame_results"] = pipeline["frame_results"][-30:][m
+[32m+[m
+[32m+[m[32m        pipeline["last_step"] = "构件匹配与判定完成"[m
+[32m+[m[32m        logger.info(f"批量处理完成, 共处理 {len(frames)} 帧")[m
+[32m+[m
+     def stop_pipeline(self, pipeline_id: str):[m
+         pipeline = self._pipelines.get(pipeline_id)[m
+         if pipeline is None:[m
+[36m@@ -129,78 +211,10 @@[m [mclass Processor:[m
+             latest = results[-1][m
+             return {[m
+                 "frame": latest["frame"],[m
+[32m+[m[32m                "image_filename": latest.get("image_filename"),[m
+                 "detections": latest["detections"],[m
+             }[m
+[31m-        return {"frame": 0, "detections": []}[m
+[31m-[m
+[31m-    def process_frame(self, pipeline_id: str):[m
+[31m-        pipeline = self._pipelines.get(pipeline_id)[m
+[31m-        if pipeline is None or pipeline["status"] != "running":[m
+[31m-            return None[m
+[31m-[m
+[31m-        ret, frame = pipeline["cap"].read()[m
+[31m-        if not ret:[m
+[31m-            pipeline["status"] = "completed"[m
+[31m-            logger.info(f"流水线 {pipeline_id} 视频读取完成, 共 {pipeline['current_frame']} 帧")[m
+[31m-            return None[m
+[31m-[m
+[31m-        pipeline["current_frame"] += 1[m
+[31m-        frame_num = pipeline["current_frame"][m
+[31m-[m
+[31m-        if frame_num <= 3 or frame_num % 30 == 0:[m
+[31m-            logger.info(f"处理第 {frame_num} 帧...")[m
+[31m-[m
+[31m-        detections = [][m
+[31m-[m
+[31m-        pipeline["last_step"] = "吊机检测"[m
+[31m-        work_region = self._detect_crane(frame)[m
+[31m-[m
+[31m-        pipeline["last_step"] = "确定检测区域"[m
+[31m-        if work_region is not None:[m
+[31m-            pass[m
+[31m-[m
+[31m-        pipeline["last_step"] = "多方法构件检测"[m
+[31m-[m
+[31m-        def _step_cb(step_name):[m
+[31m-            pipeline["last_step"] = step_name[m
+[31m-[m
+[31m-        detections = self.model_detector.detect(frame, work_region, step_callback=_step_cb)[m
+[31m-        pipeline["last_step"] = "多方法构件检测完成"[m
+[31m-[m
+[31m-        tracked = [][m
+[31m-        for det in detections:[m
+[31m-            track_id = str(uuid.uuid4())[:8][m
+[31m-            det["track_id"] = track_id[m
+[31m-[m
+[31m-            pipeline["last_step"] = "构件匹配与判定"[m
+[31m-            match = self.model_detector.match_component(frame, det["bbox"])[m
+[31m-            if match:[m
+[31m-                det["class_name"] = match["component_name"][m
+[31m-                det["confidence"] = match["confidence"][m
+[31m-                det["component_id"] = match["component_id"][m
+[31m-                pipeline["unique_components"][match["component_id"]] = match[m
+[31m-            else:[m
+[31m-                det["class_name"] = det.get("label", "未知构件")[m
+[31m-[m
+[31m-            tracked.append(det)[m
+[31m-[m
+[31m-        pipeline["detections_count"] = len(pipeline["unique_components"])[m
+[31m-[m
+[31m-        annotated_frame = self._annotate_frame(frame.copy(), tracked, frame_num)[m
+[31m-        self._save_annotated_frame(annotated_frame, pipeline_id, frame_num)[m
+[31m-[m
+[31m-        pipeline["frame_results"].append({[m
+[31m-            "frame": frame_num,[m
+[31m-            "detections": tracked,[m
+[31m-        })[m
+[31m-[m
+[31m-        if len(pipeline["frame_results"]) > 30:[m
+[31m-            pipeline["frame_results"] = pipeline["frame_results"][-30:][m
+[31m-[m
+[31m-        if frame_num <= 3 or frame_num % 30 == 0:[m
+[31m-            logger.info(f"第 {frame_num} 帧处理完成, 检测到 {len(tracked)} 个构件")[m
+[31m-[m
+[31m-        return annotated_frame[m
+[32m+[m[32m        return {"frame": 0, "image_filename": None, "detections": []}[m
+ [m
+     def _detect_crane(self, frame: np.ndarray) -> Optional[np.ndarray]:[m
+         try:[m
+[1mdiff --git a/backend/routers/pipeline_router.py b/backend/routers/pipeline_router.py[m
+[1mindex 98272df..8baccb9 100644[m
+[1m--- a/backend/routers/pipeline_router.py[m
+[1m+++ b/backend/routers/pipeline_router.py[m
+[36m@@ -8,6 +8,7 @@[m [mfrom fastapi import APIRouter, UploadFile, File, HTTPException[m
+ from pydantic import BaseModel[m
+ [m
+ from backend.config import ([m
+[32m+[m[32m    ANNOTATED_DIR,[m
+     MAX_FILE_SIZE,[m
+     SUPPORTED_EXTENSIONS,[m
+     UPLOAD_DIR,[m
+[36m@@ -143,6 +144,21 @@[m [masync def get_frame_results(pipeline_id: str):[m
+     return manager.processor.get_frame_results(pipeline_id)[m
+ [m
+ [m
+[32m+[m[32m@router.get("/annotated_image")[m
+[32m+[m[32masync def get_annotated_image(filename: str):[m
+[32m+[m[32m    from fastapi.responses import FileResponse[m
+[32m+[m
+[32m+[m[32m    safe_name = Path(filename).name[m
+[32m+[m[32m    path = ANNOTATED_DIR / safe_name[m
+[32m+[m[32m    if not path.exists():[m
+[32m+[m[32m        raise HTTPException(status_code=404, detail="图片不存在")[m
+[32m+[m[32m    return FileResponse([m
+[32m+[m[32m        path=str(path),[m
+[32m+[m[32m        media_type="image/jpeg",[m
+[32m+[m[32m        filename=safe_name,[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m
+ @router.get("/stream_video")[m
+ async def stream_video(video_path: str):[m
+     from fastapi.responses import StreamingResponse[m
+[1mdiff --git a/frontend/css/styles.css b/frontend/css/styles.css[m
+[1mindex 5b672e4..fa588e4 100644[m
+[1m--- a/frontend/css/styles.css[m
+[1m+++ b/frontend/css/styles.css[m
+[36m@@ -427,4 +427,77 @@[m [mbody {[m
+     .main-content {[m
+         grid-template-columns: 1fr;[m
+     }[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m.detection-thumbnail {[m
+[32m+[m[32m    width: 90px;[m
+[32m+[m[32m    height: 56px;[m
+[32m+[m[32m    object-fit: cover;[m
+[32m+[m[32m    border-radius: 4px;[m
+[32m+[m[32m    cursor: zoom-in;[m
+[32m+[m[32m    transition: transform 0.2s, box-shadow 0.2s;[m
+[32m+[m[32m    border: 1px solid #334155;[m
+[32m+[m[32m    display: block;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m.detection-thumbnail:hover {[m
+[32m+[m[32m    transform: scale(1.05);[m
+[32m+[m[32m    box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m.detection-thumbnail-placeholder {[m
+[32m+[m[32m    width: 90px;[m
+[32m+[m[32m    height: 56px;[m
+[32m+[m[32m    background: #0f172a;[m
+[32m+[m[32m    border: 1px dashed #334155;[m
+[32m+[m[32m    border-radius: 4px;[m
+[32m+[m[32m    display: flex;[m
+[32m+[m[32m    align-items: center;[m
+[32m+[m[32m    justify-content: center;[m
+[32m+[m[32m    color: #64748b;[m
+[32m+[m[32m    font-size: 0.7rem;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m.lightbox {[m
+[32m+[m[32m    position: fixed;[m
+[32m+[m[32m    inset: 0;[m
+[32m+[m[32m    background: rgba(0, 0, 0, 0.92);[m
+[32m+[m[32m    display: flex;[m
+[32m+[m[32m    align-items: center;[m
+[32m+[m[32m    justify-content: center;[m
+[32m+[m[32m    z-index: 1000;[m
+[32m+[m[32m    cursor: zoom-out;[m
+[32m+[m[32m    animation: fadeIn 0.2s ease;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m@keyframes fadeIn {[m
+[32m+[m[32m    from { opacity: 0; }[m
+[32m+[m[32m    to { opacity: 1; }[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m.lightbox-img {[m
+[32m+[m[32m    max-width: 92vw;[m
+[32m+[m[32m    max-height: 90vh;[m
+[32m+[m[32m    object-fit: contain;[m
+[32m+[m[32m    border-radius: 8px;[m
+[32m+[m[32m    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m.lightbox-close {[m
+[32m+[m[32m    position: absolute;[m
+[32m+[m[32m    top: 20px;[m
+[32m+[m[32m    right: 28px;[m
+[32m+[m[32m    color: #f1f5f9;[m
+[32m+[m[32m    font-size: 40px;[m
+[32m+[m[32m    font-weight: 300;[m
+[32m+[m[32m    cursor: pointer;[m
+[32m+[m[32m    line-height: 1;[m
+[32m+[m[32m    user-select: none;[m
+[32m+[m[32m    transition: color 0.2s, transform 0.2s;[m
+[32m+[m[32m    z-index: 1001;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m.lightbox-close:hover {[m
+[32m+[m[32m    color: #60a5fa;[m
+[32m+[m[32m    transform: scale(1.2);[m
+ }[m
+\ No newline at end of file[m
+[1mdiff --git a/frontend/index.html b/frontend/index.html[m
+[1mindex 0978743..765815a 100644[m
+[1m--- a/frontend/index.html[m
+[1m+++ b/frontend/index.html[m
+[36m@@ -93,13 +93,14 @@[m
+                     <h3 style="font-size:0.9rem;color:#94a3b8;margin-bottom:12px;">检测结果</h3>[m
+                     <table class="detections-table" id="detectionsTable">[m
+                         <tr>[m
+[32m+[m[32m                            <th>缩略图</th>[m
+                             <th>ID</th>[m
+                             <th>构件名称</th>[m
+                             <th>置信度</th>[m
+                             <th>检测器</th>[m
+                         </tr>[m
+                         <tr>[m
+[31m-                            <td colspan="4" style="text-align:center;color:#64748b;padding:20px;">暂无检测结果</td>[m
+[32m+[m[32m                            <td colspan="5" style="text-align:center;color:#64748b;padding:20px;">暂无检测结果</td>[m
+                         </tr>[m
+                     </table>[m
+                 </div>[m
+[36m@@ -107,6 +108,11 @@[m
+         </div>[m
+     </div>[m
+ [m
+[32m+[m[32m    <div class="lightbox" id="lightbox" style="display:none;">[m
+[32m+[m[32m        <span class="lightbox-close" id="lightboxClose">&times;</span>[m
+[32m+[m[32m        <img class="lightbox-img" id="lightboxImg" src="" alt="放大预览">[m
+[32m+[m[32m    </div>[m
+[32m+[m
+     <script src="/js/api.js"></script>[m
+     <script src="/js/dashboard.js"></script>[m
+ </body>[m
+[1mdiff --git a/frontend/js/dashboard.js b/frontend/js/dashboard.js[m
+[1mindex 2bc4566..d9c22ff 100644[m
+[1m--- a/frontend/js/dashboard.js[m
+[1m+++ b/frontend/js/dashboard.js[m
+[36m@@ -18,6 +18,7 @@[m [mlet state = {[m
+     resultsPoller: null,[m
+     completedSteps: new Set(),[m
+     currentStep: null,[m
+[32m+[m[32m    currentImageFilename: null,[m
+ };[m
+ [m
+ const els = {[m
+[36m@@ -44,6 +45,9 @@[m [mconst els = {[m
+     uniqueCount: document.getElementById('uniqueCount'),[m
+     currentFps: document.getElementById('currentFps'),[m
+     elapsedTime: document.getElementById('elapsedTime'),[m
+[32m+[m[32m    lightbox: document.getElementById('lightbox'),[m
+[32m+[m[32m    lightboxImg: document.getElementById('lightboxImg'),[m
+[32m+[m[32m    lightboxClose: document.getElementById('lightboxClose'),[m
+ };[m
+ [m
+ async function init() {[m
+[36m@@ -275,7 +279,8 @@[m [mfunction startResultsPolling() {[m
+ [m
+         try {[m
+             const results = await Api.getFrameResults(state.pipelineId);[m
+[31m-            renderDetections(results.detections || []);[m
+[32m+[m[32m            state.currentImageFilename = results.image_filename || null;[m
+[32m+[m[32m            renderDetections(results.detections || [], results.image_filename);[m
+         } catch (e) {[m
+             console.error('获取结果失败:', e);[m
+         }[m
+[36m@@ -311,17 +316,18 @@[m [mfunction updateProgress(status) {[m
+     }[m
+ }[m
+ [m
+[31m-function renderDetections(detections) {[m
+[32m+[m[32mfunction renderDetections(detections, imageFilename) {[m
+     if (detections.length === 0) {[m
+         els.detectionsTable.innerHTML = `[m
+             <tr>[m
+[32m+[m[32m                <th>缩略图</th>[m
+                 <th>ID</th>[m
+                 <th>构件名称</th>[m
+                 <th>置信度</th>[m
+                 <th>检测器</th>[m
+             </tr>[m
+             <tr>[m
+[31m-                <td colspan="4" style="text-align:center;color:#64748b;padding:20px;">暂无检测结果</td>[m
+[32m+[m[32m                <td colspan="5" style="text-align:center;color:#64748b;padding:20px;">暂无检测结果</td>[m
+             </tr>[m
+         `;[m
+         return;[m
+[36m@@ -329,6 +335,7 @@[m [mfunction renderDetections(detections) {[m
+ [m
+     const header = `[m
+         <tr>[m
+[32m+[m[32m            <th>缩略图</th>[m
+             <th>ID</th>[m
+             <th>构件名称</th>[m
+             <th>置信度</th>[m
+[36m@@ -336,12 +343,20 @@[m [mfunction renderDetections(detections) {[m
+         </tr>[m
+     `;[m
+ [m
+[32m+[m[32m    const thumbUrl = imageFilename ? `/api/pipeline/annotated_image?filename=${encodeURIComponent(imageFilename)}` : null;[m
+[32m+[m
+     const rows = detections.map(d => {[m
+         const confidenceClass = d.confidence >= 0.7 ? 'badge-green' : (d.confidence >= 0.5 ? 'badge-yellow' : 'badge-red');[m
+         const detectorClass = d.detector === 'grounding_dino' ? 'badge-blue' : 'badge-yellow';[m
+         const detectorName = d.detector === 'grounding_dino' ? 'GroundingDINO' : (d.detector === 'traditional_cv' ? '传统CV' : d.detector);[m
+[32m+[m
+[32m+[m[32m        const thumbCell = thumbUrl[m
+[32m+[m[32m            ? `<td><img class="detection-thumbnail" src="${thumbUrl}" alt="缩略图" data-fullsrc="${thumbUrl}"></td>`[m
+[32m+[m[32m            : `<td><div class="detection-thumbnail-placeholder">无</div></td>`;[m
+[32m+[m
+         return `[m
+             <tr>[m
+[32m+[m[32m                ${thumbCell}[m
+                 <td>${d.track_id || '-'}</td>[m
+                 <td>${d.class_name || d.label || '-'}</td>[m
+                 <td><span class="badge ${confidenceClass}">${(d.confidence * 100).toFixed(1)}%</span></td>[m
+[36m@@ -351,6 +366,30 @@[m [mfunction renderDetections(detections) {[m
+     }).join('');[m
+ [m
+     els.detectionsTable.innerHTML = header + rows;[m
+[32m+[m
+[32m+[m[32m    els.detectionsTable.querySelectorAll('.detection-thumbnail').forEach(img => {[m
+[32m+[m[32m        img.addEventListener('click', () => {[m
+[32m+[m[32m            const fullSrc = img.dataset.fullsrc || img.src;[m
+[32m+[m[32m            els.lightboxImg.src = fullSrc;[m
+[32m+[m[32m            els.lightbox.style.display = 'flex';[m
+[32m+[m[32m        });[m
+[32m+[m[32m    });[m
+ }[m
+ [m
+[32m+[m[32mels.lightboxClose.addEventListener('click', () => {[m
+[32m+[m[32m    els.lightbox.style.display = 'none';[m
+[32m+[m[32m});[m
+[32m+[m
+[32m+[m[32mels.lightbox.addEventListener('click', (e) => {[m
+[32m+[m[32m    if (e.target === els.lightbox) {[m
+[32m+[m[32m        els.lightbox.style.display = 'none';[m
+[32m+[m[32m    }[m
+[32m+[m[32m});[m
+[32m+[m
+[32m+[m[32mdocument.addEventListener('keydown', (e) => {[m
+[32m+[m[32m    if (e.key === 'Escape' && els.lightbox.style.display === 'flex') {[m
+[32m+[m[32m        els.lightbox.style.display = 'none';[m
+[32m+[m[32m    }[m
+[32m+[m[32m});[m
+[32m+[m
+ init();[m
+\ No newline at end of file[m
