@@ -450,44 +450,98 @@ class ModelDetector:
 
             geometry_features = self._analyze_roi_geometry(roi)
 
-            fused_scores = self._fuse_scores(clip_probs, geometry_features)
+            final_idx, final_score = self._resolve_match(clip_probs, geometry_features)
 
-            best_idx = np.argmax(fused_scores)
-            best_score = float(fused_scores[best_idx])
-
-            if best_score < CONFIDENCE_THRESHOLD:
+            if final_score < CONFIDENCE_THRESHOLD:
                 return None
 
-            component = COMPONENT_LIBRARY[best_idx]
+            component = COMPONENT_LIBRARY[final_idx]
+            clip_score_of_winner = float(clip_probs[final_idx])
+            geometry_score_of_winner = float(geometry_features.get(
+                f"shape_{component.get('shape', '')}", 0.0
+            ))
+
+            logger.info(
+                f"构件匹配: {component['name']} | "
+                f"最终={final_score:.3f} | "
+                f"CLIP={clip_score_of_winner:.3f} | "
+                f"几何={geometry_score_of_winner:.3f} | "
+                f"AR={geometry_features.get('aspect_ratio', 0):.2f} | "
+                f"阶梯={geometry_features.get('shape_stepped', 0):.2f} | "
+                f"平整={geometry_features.get('shape_flat_large', 0):.2f}"
+            )
+
             return {
                 "component_id": component["id"],
                 "component_name": component["name"],
-                "confidence": best_score,
-                "clip_score": float(clip_probs[best_idx]),
-                "geometry_score": float(fused_scores[best_idx] - clip_probs[best_idx]),
+                "confidence": final_score,
+                "clip_score": clip_score_of_winner,
+                "geometry_score": geometry_score_of_winner,
             }
         except Exception as e:
             logger.warning(f"CLIP 匹配异常: {e}")
             return None
 
+    def _resolve_match(self, clip_probs: np.ndarray, geometry_features: dict):
+        shape_scores = {
+            "rect_vertical": geometry_features.get("shape_rect_vertical", 0.0),
+            "rect_horizontal": geometry_features.get("shape_rect_horizontal", 0.0),
+            "flat_large": geometry_features.get("shape_flat_large", 0.0),
+            "stepped": geometry_features.get("shape_stepped", 0.0),
+            "small_circle": geometry_features.get("shape_small_circle", 0.0),
+        }
+
+        shape_to_components = {}
+        for idx, comp in enumerate(COMPONENT_LIBRARY):
+            shape = comp.get("shape", "")
+            if shape not in shape_to_components:
+                shape_to_components[shape] = []
+            shape_to_components[shape].append((idx, comp))
+
+        candidate_scores = {}
+
+        for shape, comps in shape_to_components.items():
+            geo_score = shape_scores.get(shape, 0.0)
+            clip_max = max(clip_probs[idx] for idx, _ in comps)
+            best_idx = max(comps, key=lambda x: clip_probs[x[0]])[0]
+
+            if len(comps) == 1:
+                if geo_score >= 0.5:
+                    final = 0.25 * clip_probs[best_idx] + 0.75 * geo_score
+                elif geo_score >= 0.3:
+                    final = 0.5 * clip_probs[best_idx] + 0.5 * geo_score
+                else:
+                    final = 0.8 * clip_probs[best_idx] + 0.2 * geo_score
+            else:
+                final = 0.7 * clip_probs[best_idx] + 0.3 * geo_score
+
+            candidate_scores[best_idx] = final
+
+            logger.debug(
+                f"  shape={shape} geo={geo_score:.3f} "
+                f"clip_max={clip_max:.3f} final={final:.3f}"
+            )
+
+        best_idx = max(candidate_scores, key=candidate_scores.get)
+        best_score = candidate_scores[best_idx]
+
+        return best_idx, best_score
+
     def _analyze_roi_geometry(self, roi: np.ndarray) -> dict:
         h, w = roi.shape[:2]
         features = {
             "aspect_ratio": w / max(h, 1),
-            "area_ratio": 1.0,
+            "edge_density": 0.0,
+            "horizontal_lines": 0,
+            "row_variance": 0.0,
             "step_score": 0.0,
             "flat_score": 0.0,
-            "vertical_score": 0.0,
-            "horizontal_score": 0.0,
-            "edge_density": 0.0,
-            "contour_count": 0,
-            "has_stepped_pattern": False,
-            "shape_vertical": 0.0,
-            "shape_horizontal": 0.0,
             "shape_flat_large": 0.0,
             "shape_stepped": 0.0,
-            "shape_small_circle": 0.0,
             "shape_rect_vertical": 0.0,
+            "shape_rect_horizontal": 0.0,
+            "shape_small_circle": 0.0,
+            "has_stepped_pattern": False,
         }
 
         try:
@@ -497,78 +551,93 @@ class ModelDetector:
             edge_density = np.count_nonzero(edges) / max(w * h, 1)
             features["edge_density"] = float(edge_density)
 
-            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            features["contour_count"] = len(contours)
-
-            approx_count = 0
-            for cnt in contours:
-                area = cv2.contourArea(cnt)
-                if area < (w * h) * 0.01:
-                    continue
-                approx = cv2.approxPolyDP(cnt, 0.05 * cv2.arcLength(cnt, True), True)
-                if len(approx) <= 6:
-                    approx_count += 1
-
             features["aspect_ratio"] = w / max(h, 1)
 
             if h > 10 and w > 10:
                 row_means = np.mean(gray, axis=1)
+                row_stds = np.std(gray, axis=1)
+                features["row_variance"] = float(np.mean(row_stds))
+
                 row_diffs = np.abs(np.diff(row_means))
-                threshold = np.mean(row_diffs) + 2 * np.std(row_diffs)
-                significant_changes = np.sum(row_diffs > threshold)
-                features["step_score"] = float(min(significant_changes / max(h * 0.1, 1), 1.0))
+                diff_threshold = np.mean(row_diffs) + 1.5 * np.std(row_diffs)
+                significant_changes = np.sum(row_diffs > diff_threshold)
 
-                step_rows = 0
-                for i in range(1, len(row_diffs)):
-                    if row_diffs[i] > threshold and abs(i - np.argmax(row_diffs)) > 3:
-                        step_rows += 1
-                features["has_stepped_pattern"] = step_rows >= 2
-                features["shape_stepped"] = float(min(step_rows / max(h * 0.05, 1), 1.0))
+                h_lines = 0
+                for i in range(1, len(row_diffs) - 1):
+                    if (row_diffs[i] > diff_threshold and
+                        row_diffs[i - 1] <= diff_threshold and
+                        row_diffs[i + 1] <= diff_threshold):
+                        h_lines += 1
 
-            if features["aspect_ratio"] > 2.0:
-                features["flat_score"] = float(min((features["aspect_ratio"] - 2.0) / 3.0, 1.0))
-                features["shape_flat_large"] = features["flat_score"]
+                features["horizontal_lines"] = h_lines
 
-            if features["aspect_ratio"] > 3.0 and edge_density < 0.15:
-                features["shape_flat_large"] = float(min(features["shape_flat_large"] + 0.3, 1.0))
+                if h_lines >= 2:
+                    features["has_stepped_pattern"] = True
 
-            if features["aspect_ratio"] < 0.6:
-                features["vertical_score"] = float(min((0.6 - features["aspect_ratio"]) / 0.4, 1.0))
-                features["shape_vertical"] = features["vertical_score"]
-                features["shape_rect_vertical"] = features["vertical_score"]
+                features["step_score"] = float(min(h_lines / max(h * 0.08, 1), 1.0))
+                features["shape_stepped"] = features["step_score"]
 
-            if features["aspect_ratio"] > 1.5 and features["aspect_ratio"] <= 3.0:
-                features["horizontal_score"] = float(min((features["aspect_ratio"] - 1.5) / 1.5, 1.0))
-                features["shape_rect_vertical"] = features["horizontal_score"] * 0.5
+                if h_lines >= 3 and features["aspect_ratio"] < 4.0:
+                    features["shape_stepped"] = float(min(features["shape_stepped"] + 0.3, 1.0))
 
-            if w * h < 8000:
-                features["shape_small_circle"] = float(min(1.0 - (w * h) / 8000, 1.0))
+            if h > 5 and w > 5:
+                edges_h = cv2.Canny(gray, 30, 100)
+                lines = cv2.HoughLinesP(
+                    edges_h, 1, np.pi / 180,
+                    threshold=max(30, h // 4),
+                    minLineLength=max(20, w // 4),
+                    maxLineGap=10
+                )
+                hough_h_lines = 0
+                if lines is not None:
+                    for line in lines:
+                        x1, y1, x2, y2 = line[0]
+                        angle = abs(np.arctan2(abs(y2 - y1), abs(x2 - x1)) * 180.0 / np.pi)
+                        if angle < 15:
+                            hough_h_lines += 1
 
-            if features["has_stepped_pattern"]:
-                features["shape_stepped"] = float(min(features["shape_stepped"] + 0.4, 1.0))
-                features["shape_flat_large"] *= 0.3
+                if hough_h_lines >= 2 and features["aspect_ratio"] > 2.5:
+                    features["shape_stepped"] = float(
+                        (features["shape_stepped"] + min(hough_h_lines / 8.0, 0.5)) / 2.0
+                    )
+
+            ar = features["aspect_ratio"]
+            if ar > 2.5:
+                flat_base = min((ar - 2.5) / 3.5, 1.0)
+                features["shape_flat_large"] = flat_base
+
+                if edge_density < 0.12:
+                    features["shape_flat_large"] = float(
+                        min(features["shape_flat_large"] + 0.25, 1.0)
+                    )
+
+                if ar > 3.5 and features["row_variance"] < 30:
+                    features["shape_flat_large"] = float(
+                        min(features["shape_flat_large"] + 0.15, 1.0)
+                    )
+
+            if ar < 0.7:
+                features["shape_rect_vertical"] = float(
+                    min((0.7 - ar) / 0.5, 1.0)
+                )
+            elif ar > 1.3 and ar <= 2.5:
+                features["shape_rect_horizontal"] = float(
+                    min((ar - 1.3) / 1.2, 1.0)
+                )
+
+            if w * h < 6000:
+                features["shape_small_circle"] = float(
+                    min(1.0 - (w * h) / 6000, 1.0)
+                )
+
+            if features["has_stepped_pattern"] and features["shape_stepped"] > 0.3:
+                features["shape_flat_large"] *= 0.2
+                features["shape_rect_vertical"] *= 0.3
+
+            if features["shape_flat_large"] > 0.5 and features["edge_density"] < 0.12:
+                features["shape_stepped"] *= 0.15
 
         except Exception as e:
             logger.warning(f"ROI几何分析异常: {e}")
 
         return features
-
-    def _fuse_scores(self, clip_probs: np.ndarray, geometry_features: dict) -> np.ndarray:
-        fused = clip_probs.copy()
-        geometry_weight = 0.35
-
-        shape_scores = {
-            "rect_vertical": geometry_features.get("shape_rect_vertical", 0.0),
-            "rect_horizontal": geometry_features.get("horizontal_score", 0.0),
-            "flat_large": geometry_features.get("shape_flat_large", 0.0),
-            "stepped": geometry_features.get("shape_stepped", 0.0),
-            "small_circle": geometry_features.get("shape_small_circle", 0.0),
-        }
-
-        for idx, component in enumerate(COMPONENT_LIBRARY):
-            shape = component.get("shape", "")
-            geo_score = shape_scores.get(shape, 0.0)
-            fused[idx] = (1 - geometry_weight) * clip_probs[idx] + geometry_weight * geo_score
-
-        fused = fused / fused.sum()
-        return fused
