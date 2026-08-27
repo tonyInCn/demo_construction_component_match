@@ -232,6 +232,15 @@ body {
     margin-top: 20px;
 }
 
+.detection-steps::before {
+    content: '检测步骤';
+    display: block;
+    font-size: 0.9rem;
+    color: #94a3b8;
+    margin-bottom: 12px;
+    font-weight: 600;
+}
+
 .step-item {
     display: flex;
     align-items: center;
@@ -245,12 +254,14 @@ body {
 }
 
 .step-item.active {
-    background: linear-gradient(90deg, rgba(59, 130, 246, 0.2), transparent);
+    background: linear-gradient(90deg, rgba(59, 130, 246, 0.25), transparent);
     border-left: 3px solid #3b82f6;
+    box-shadow: 0 0 12px rgba(59, 130, 246, 0.15);
 }
 
 .step-item.completed {
-    opacity: 0.7;
+    background: rgba(34, 197, 94, 0.1);
+    border-left: 3px solid #22c55e;
 }
 
 .step-icon {
@@ -267,14 +278,33 @@ body {
 
 .step-item.active .step-icon {
     background: #3b82f6;
+    animation: pulse 1.5s infinite;
 }
 
 .step-item.completed .step-icon {
     background: #22c55e;
 }
 
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
 .step-text {
     flex: 1;
+}
+
+.step-item[data-substep="true"] {
+    margin-left: 16px;
+    padding: 8px 12px;
+    font-size: 0.8rem;
+    opacity: 0.85;
+}
+
+.step-item[data-substep="true"] .step-icon {
+    width: 20px;
+    height: 20px;
+    font-size: 0.7rem;
 }
 
 .detections-table {

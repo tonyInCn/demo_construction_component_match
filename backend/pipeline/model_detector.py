@@ -148,16 +148,24 @@ class ModelDetector:
             logger.warning(f"CLIP 加载失败: {e}")
             return None, None
 
-    def detect(self, frame: np.ndarray, work_region: Optional[np.ndarray] = None):
+    def detect(self, frame: np.ndarray, work_region: Optional[np.ndarray] = None,
+               step_callback=None):
         detections = []
         h, w = frame.shape[:2]
 
+        if step_callback:
+            step_callback("GroundingDINO检测")
         detections.extend(self._detect_grounding_dino(frame, w, h))
+
+        if step_callback:
+            step_callback("传统CV检测")
         detections.extend(self._detect_traditional_cv(frame, w, h))
 
         if len(detections) == 0:
             return detections
 
+        if step_callback:
+            step_callback("NMS融合去重")
         detections = self._apply_nms(detections)
         return detections
 
@@ -181,28 +189,36 @@ class ModelDetector:
             prompts = GROUNDING_PROMPTS
             try:
                 outputs = self.grounding_dino(
-                    images=pil_image,
+                    image=pil_image,
                     candidate_labels=prompts,
                 )
             except Exception:
                 prompt_text = ", ".join(prompts)
                 outputs = self.grounding_dino(
-                    images=pil_image,
+                    image=pil_image,
                     text=prompt_text,
                 )
 
-            boxes = outputs.get("boxes", [])
-            scores = outputs.get("scores", [])
-            labels = outputs.get("labels", [])
+            detections = outputs if isinstance(outputs, list) else []
 
-            for box, score, label in zip(boxes, scores, labels):
+            for det in detections:
+                score = float(det.get("score", 0))
                 if score < 0.3:
                     continue
-                box = [float(b) / scale for b in box] if scale != 1.0 else [float(b) for b in box]
-                x1, y1, x2, y2 = box
+                label = det.get("label", "unknown")
+                box = det.get("box", {})
+                x1 = float(box.get("xmin", 0))
+                y1 = float(box.get("ymin", 0))
+                x2 = float(box.get("xmax", 0))
+                y2 = float(box.get("ymax", 0))
+                if scale != 1.0:
+                    x1 /= scale
+                    y1 /= scale
+                    x2 /= scale
+                    y2 /= scale
                 results.append({
                     "bbox": [int(x1), int(y1), int(x2 - x1), int(y2 - y1)],
-                    "confidence": float(score),
+                    "confidence": score,
                     "label": label,
                     "detector": "grounding_dino",
                 })

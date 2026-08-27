@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -12,6 +13,11 @@ from backend.pipeline.processor import Processor
 from backend.routers.pipeline_router import router as pipeline_router, set_pipeline_manager
 
 logger = get_logger(__name__)
+
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("diffusers").setLevel(logging.ERROR)
+logging.getLogger("PIL").setLevel(logging.ERROR)
 
 
 class PipelineManager:

@@ -1,3 +1,4 @@
+import threading
 import time
 import uuid
 from typing import Optional
@@ -16,6 +17,7 @@ class Processor:
     def __init__(self, model_detector: ModelDetector):
         self.model_detector = model_detector
         self._pipelines = {}
+        self._threads = {}
 
     def start_pipeline(self, video_path: str, device: str = "cuda"):
         pipeline_id = str(uuid.uuid4())
@@ -48,12 +50,44 @@ class Processor:
         }
         self._pipelines[pipeline_id] = pipeline
 
+        t = threading.Thread(
+            target=self._run_processing_loop,
+            args=(pipeline_id,),
+            daemon=True,
+            name=f"pipeline-{pipeline_id[:8]}",
+        )
+        t.start()
+        self._threads[pipeline_id] = t
+
         return {
             "pipeline_id": pipeline_id,
             "status": "started",
             "total_frames": total_frames,
             "fps": fps,
         }
+
+    def _run_processing_loop(self, pipeline_id: str):
+        pipeline = self._pipelines.get(pipeline_id)
+        if pipeline is None:
+            logger.error(f"流水线 {pipeline_id} 不存在")
+            return
+
+        logger.info(f"流水线 {pipeline_id} 后台线程启动, 视频: {pipeline['video_path']}, 总帧数: {pipeline['total_frames']}")
+
+        while pipeline["status"] == "running":
+            try:
+                result = self.process_frame(pipeline_id)
+                if result is None:
+                    logger.info(f"流水线 {pipeline_id} 处理循环结束")
+                    break
+            except Exception as e:
+                logger.error(f"处理帧异常: {e}", exc_info=True)
+                pipeline["status"] = "error"
+                break
+
+        if pipeline["status"] == "running":
+            pipeline["status"] = "completed"
+            logger.info(f"流水线 {pipeline_id} 处理完成, 共 {pipeline['current_frame']} 帧")
 
     def stop_pipeline(self, pipeline_id: str):
         pipeline = self._pipelines.get(pipeline_id)
@@ -107,10 +141,14 @@ class Processor:
         ret, frame = pipeline["cap"].read()
         if not ret:
             pipeline["status"] = "completed"
+            logger.info(f"流水线 {pipeline_id} 视频读取完成, 共 {pipeline['current_frame']} 帧")
             return None
 
         pipeline["current_frame"] += 1
         frame_num = pipeline["current_frame"]
+
+        if frame_num <= 3 or frame_num % 30 == 0:
+            logger.info(f"处理第 {frame_num} 帧...")
 
         detections = []
 
@@ -122,7 +160,12 @@ class Processor:
             pass
 
         pipeline["last_step"] = "多方法构件检测"
-        detections = self.model_detector.detect(frame, work_region)
+
+        def _step_cb(step_name):
+            pipeline["last_step"] = step_name
+
+        detections = self.model_detector.detect(frame, work_region, step_callback=_step_cb)
+        pipeline["last_step"] = "多方法构件检测完成"
 
         tracked = []
         for det in detections:
@@ -153,6 +196,9 @@ class Processor:
 
         if len(pipeline["frame_results"]) > 30:
             pipeline["frame_results"] = pipeline["frame_results"][-30:]
+
+        if frame_num <= 3 or frame_num % 30 == 0:
+            logger.info(f"第 {frame_num} 帧处理完成, 检测到 {len(tracked)} 个构件")
 
         return annotated_frame
 

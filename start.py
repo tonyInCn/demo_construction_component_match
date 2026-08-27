@@ -44,6 +44,7 @@ def main():
         "backend.main:app",
         "--host", "0.0.0.0",
         "--port", str(port),
+        "--log-level", "warning",
     ])
 
 

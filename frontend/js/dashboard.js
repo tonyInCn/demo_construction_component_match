@@ -1,3 +1,13 @@
+const DETECTION_STEPS = [
+    { key: '吊机检测', label: '吊机检测' },
+    { key: '确定检测区域', label: '确定检测区域' },
+    { key: 'GroundingDINO检测', label: 'GroundingDINO 检测' },
+    { key: '传统CV检测', label: '传统CV 检测' },
+    { key: 'NMS融合去重', label: 'NMS 融合去重' },
+    { key: '多方法构件检测完成', label: '多方法检测完成' },
+    { key: '构件匹配与判定', label: '构件匹配与判定' },
+];
+
 let state = {
     modelStatus: null,
     pipelineId: null,
@@ -6,6 +16,8 @@ let state = {
     isDetecting: false,
     statusPoller: null,
     resultsPoller: null,
+    completedSteps: new Set(),
+    currentStep: null,
 };
 
 const els = {
@@ -40,6 +52,7 @@ async function init() {
         updateStatus('loading', '加载中...');
         await loadModelStatus();
         startModelStatusPolling();
+        renderPipelineSteps();
     } catch (e) {
         updateStatus('error', '连接失败');
         console.error(e);
@@ -93,48 +106,47 @@ function renderModelStatus(status) {
     els.modelClip.className = status.clip_loaded ? 'badge badge-green' : 'badge badge-red';
 
     els.modelLoadProgress.textContent = `${status.load_progress || 0}%`;
-
-    renderDetectionSteps(status.load_steps || [], status.load_step);
 }
 
-function renderDetectionSteps(steps, currentStep) {
+function renderPipelineSteps() {
     els.detectionSteps.innerHTML = '';
-    const allSteps = steps.length > 0 ? steps : ['初始化环境', '环境就绪', 'GroundingDINO 就绪', 'CLIP 就绪', '全部就绪'];
 
-    allSteps.forEach((step, idx) => {
+    const subSteps = new Set(['GroundingDINO检测', '传统CV检测', 'NMS融合去重']);
+
+    DETECTION_STEPS.forEach((step, idx) => {
         const item = document.createElement('div');
         item.className = 'step-item';
-        if (step === currentStep) {
-            item.classList.add('active');
-        } else if (isStepCompleted(step, currentStep, allSteps)) {
+        if (subSteps.has(step.key)) {
+            item.dataset.substep = 'true';
+        }
+
+        const isCompleted = state.completedSteps.has(step.key);
+        const isCurrent = state.currentStep === step.key;
+
+        if (isCompleted) {
             item.classList.add('completed');
+        } else if (isCurrent) {
+            item.classList.add('active');
         }
 
         const icon = document.createElement('div');
         icon.className = 'step-icon';
-        if (item.classList.contains('active')) {
-            icon.innerHTML = '&#9679;';
-        } else if (item.classList.contains('completed')) {
+        if (isCompleted) {
             icon.innerHTML = '&#10003;';
+        } else if (isCurrent) {
+            icon.innerHTML = '&#9679;';
         } else {
             icon.textContent = idx + 1;
         }
 
         const text = document.createElement('div');
         text.className = 'step-text';
-        text.textContent = step;
+        text.textContent = step.label;
 
         item.appendChild(icon);
         item.appendChild(text);
         els.detectionSteps.appendChild(item);
     });
-}
-
-function isStepCompleted(step, currentStep, steps) {
-    if (!currentStep) return false;
-    const currentIdx = steps.indexOf(currentStep);
-    const stepIdx = steps.indexOf(step);
-    return currentIdx !== -1 && stepIdx < currentIdx;
 }
 
 function showLoading(text, isError = false) {
@@ -198,6 +210,9 @@ els.btnStart.addEventListener('click', async () => {
         const result = await Api.startDetection(state.videoPath, 'cuda');
         state.pipelineId = result.pipeline_id;
         state.isDetecting = true;
+        state.completedSteps.clear();
+        state.currentStep = null;
+        renderPipelineSteps();
 
         els.btnStart.style.display = 'none';
         els.btnStop.style.display = 'inline-flex';
@@ -277,7 +292,22 @@ function updateProgress(status) {
     els.elapsedTime.textContent = status.elapsed_time || '-';
 
     if (status.last_step) {
-        renderDetectionSteps([status.last_step], status.last_step);
+        const matched = DETECTION_STEPS.find(s => s.key === status.last_step);
+        if (matched) {
+            if (state.currentStep && state.currentStep !== matched.key) {
+                state.completedSteps.add(state.currentStep);
+            }
+            state.currentStep = matched.key;
+            renderPipelineSteps();
+        }
+    }
+
+    if (status.status === 'completed') {
+        if (state.currentStep) {
+            state.completedSteps.add(state.currentStep);
+            state.currentStep = null;
+            renderPipelineSteps();
+        }
     }
 }
 
