@@ -31,6 +31,8 @@ FRAME_SAMPLE_RATE = 5
 INFERENCE_MAX_SIDE = 480
 BATCH_SIZE = 8
 
+CANDIDATE_WINDOW_FRAMES = 5
+
 SUPPORTED_EXTENSIONS = {
     ".mp4", ".avi", ".mov", ".mkv", ".wmv",
     ".flv", ".webm", ".m4v", ".mpg", ".mpeg"

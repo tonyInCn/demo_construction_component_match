@@ -335,102 +335,138 @@ function renderDetections(detections) {
         return;
     }
 
-    const newComponents = detections.filter(d => !state.displayedComponentIds.has(d.component_id));
-    if (newComponents.length === 0) {
-        return;
-    }
+    const pendingById = {};
+    const committedById = {};
+    detections.forEach(d => {
+        if (d.pending) {
+            pendingById[d.component_id] = d;
+        } else {
+            committedById[d.component_id] = d;
+        }
+    });
 
-    newComponents.forEach(d => state.displayedComponentIds.add(d.component_id));
+    const allIds = new Set([...Object.keys(pendingById), ...Object.keys(committedById)]);
 
-    if (state.displayedComponentIds.size === detections.length) {
+    if (state.displayedComponentIds.size === 0 && allIds.size > 0) {
         els.pipelineResults.innerHTML = '';
     }
 
-    const cardsHtml = newComponents.map(d => {
-        const confidenceClass = d.confidence >= 0.7 ? 'badge-green' : (d.confidence >= 0.5 ? 'badge-yellow' : 'badge-red');
-        const detectorClass = d.detector === 'grounding_dino' ? 'badge-blue' : 'badge-yellow';
-        const detectorName = d.detector === 'grounding_dino' ? 'GroundingDINO' : (d.detector === 'traditional_cv' ? '传统CV' : (d.detector || '-'));
+    allIds.forEach(compId => {
+        const isCommitted = committedById[compId] !== undefined;
 
-        const baseUrl = '/api/pipeline/annotated_image?filename=';
+        if (!state.displayedComponentIds.has(compId)) {
+            state.displayedComponentIds.add(compId);
+            const d = committedById[compId] || pendingById[compId];
+            const cardHtml = buildCardHtml(d, false);
+            els.pipelineResults.insertAdjacentHTML('beforeend', cardHtml);
+            attachLightboxListeners();
+        } else {
+            const d = committedById[compId] || pendingById[compId];
+            const cardEl = document.querySelector(`[data-comp-id="${compId}"]`);
+            if (cardEl) {
+                const newHtml = buildCardHtml(d, !isCommitted);
+                const temp = document.createElement('div');
+                temp.innerHTML = newHtml;
+                cardEl.replaceWith(temp.firstElementChild);
+                attachLightboxListeners();
+            }
+        }
+    });
+}
 
-        const stepCrane = d.crane_image_filename
-            ? `<div class="pipeline-step-image" data-src="${baseUrl}${encodeURIComponent(d.crane_image_filename)}">
-                 <span class="pipeline-frame-badge">帧 ${d.frame}</span>
-                 <img src="${baseUrl}${encodeURIComponent(d.crane_image_filename)}" alt="吊机检测" loading="lazy">
-               </div>`
-            : `<div class="pipeline-step-placeholder">吊机检测<br>无数据</div>`;
+function buildCardHtml(d, isPending) {
+    const confidenceClass = d.confidence >= 0.7 ? 'badge-green' : (d.confidence >= 0.5 ? 'badge-yellow' : 'badge-red');
+    const detectorClass = d.detector === 'grounding_dino' ? 'badge-blue' : 'badge-yellow';
+    const detectorName = d.detector === 'grounding_dino' ? 'GroundingDINO' : (d.detector === 'traditional_cv' ? '传统CV' : (d.detector || '-'));
 
-        const stepROI = d.roi_image_filename
-            ? `<div class="pipeline-step-image" data-src="${baseUrl}${encodeURIComponent(d.roi_image_filename)}">
-                 <span class="pipeline-frame-badge">帧 ${d.frame}</span>
-                 <img src="${baseUrl}${encodeURIComponent(d.roi_image_filename)}" alt="检测范围" loading="lazy">
-               </div>`
-            : `<div class="pipeline-step-placeholder">检测范围<br>无数据</div>`;
+    const baseUrl = '/api/pipeline/annotated_image?filename=';
 
-        const stepDetect = d.image_filename
-            ? `<div class="pipeline-step-image" data-src="${baseUrl}${encodeURIComponent(d.image_filename)}">
-                 <span class="pipeline-frame-badge">帧 ${d.frame}</span>
-                 <img src="${baseUrl}${encodeURIComponent(d.image_filename)}" alt="构件检测" loading="lazy">
-               </div>`
-            : `<div class="pipeline-step-placeholder">构件检测<br>无数据</div>`;
+    const stepCrane = d.crane_image_filename
+        ? `<div class="pipeline-step-image" data-src="${baseUrl}${encodeURIComponent(d.crane_image_filename)}">
+             <span class="pipeline-frame-badge">帧 ${d.frame}</span>
+             <img src="${baseUrl}${encodeURIComponent(d.crane_image_filename)}" alt="吊机检测" loading="lazy">
+           </div>`
+        : `<div class="pipeline-step-placeholder">吊机检测<br>无数据</div>`;
 
-        const stepCompROI = d.component_roi_filename
-            ? `<div class="pipeline-step-image" data-src="${baseUrl}${encodeURIComponent(d.component_roi_filename)}">
-                 <span class="pipeline-frame-badge">#${d.component_id ? d.component_id.split('_').pop() : ''}</span>
-                 <img src="${baseUrl}${encodeURIComponent(d.component_roi_filename)}" alt="构件ROI" loading="lazy">
-               </div>`
-            : `<div class="pipeline-step-placeholder">构件ROI<br>无数据</div>`;
+    const stepROI = d.roi_image_filename
+        ? `<div class="pipeline-step-image" data-src="${baseUrl}${encodeURIComponent(d.roi_image_filename)}">
+             <span class="pipeline-frame-badge">帧 ${d.frame}</span>
+             <img src="${baseUrl}${encodeURIComponent(d.roi_image_filename)}" alt="检测范围" loading="lazy">
+           </div>`
+        : `<div class="pipeline-step-placeholder">检测范围<br>无数据</div>`;
 
-        const matchDetail = (d.clip_score != null || d.geometry_score != null)
-            ? `<div class="pipeline-meta-item">
-                 ${d.clip_score != null ? `CLIP: ${(d.clip_score * 100).toFixed(1)}%` : ''}
-                 ${d.clip_score != null && d.geometry_score != null ? ' | ' : ''}
-                 ${d.geometry_score != null ? `几何: ${(d.geometry_score * 100).toFixed(1)}%` : ''}
-               </div>`
-            : '';
+    const stepDetect = d.image_filename
+        ? `<div class="pipeline-step-image" data-src="${baseUrl}${encodeURIComponent(d.image_filename)}">
+             <span class="pipeline-frame-badge">帧 ${d.frame}</span>
+             <img src="${baseUrl}${encodeURIComponent(d.image_filename)}" alt="构件检测" loading="lazy">
+           </div>`
+        : `<div class="pipeline-step-placeholder">构件检测<br>无数据</div>`;
 
-        return `
-            <div class="pipeline-card">
-                <div class="pipeline-header">
-                    <div class="pipeline-title">
-                        <span>${d.class_name || d.label || '未知构件'}</span>
-                        <span class="pipeline-id-tag">${d.component_id || d.track_id || ''}</span>
-                    </div>
-                    <div style="display:flex;gap:8px;align-items:center;">
-                        <span class="badge ${detectorClass}">${detectorName}</span>
-                        <span class="badge ${confidenceClass}">${(d.confidence * 100).toFixed(1)}%</span>
-                    </div>
+    const stepCompROI = d.component_roi_filename
+        ? `<div class="pipeline-step-image" data-src="${baseUrl}${encodeURIComponent(d.component_roi_filename)}">
+             <span class="pipeline-frame-badge">#${d.component_id ? d.component_id.split('_').pop() : ''}</span>
+             <img src="${baseUrl}${encodeURIComponent(d.component_roi_filename)}" alt="构件ROI" loading="lazy">
+           </div>`
+        : `<div class="pipeline-step-placeholder">构件ROI<br>无数据</div>`;
+
+    const matchDetail = (d.clip_score != null || d.geometry_score != null)
+        ? `<div class="pipeline-meta-item">
+             ${d.clip_score != null ? `CLIP: ${(d.clip_score * 100).toFixed(1)}%` : ''}
+             ${d.clip_score != null && d.geometry_score != null ? ' | ' : ''}
+             ${d.geometry_score != null ? `几何: ${(d.geometry_score * 100).toFixed(1)}%` : ''}
+           </div>`
+        : '';
+
+    const pendingBadge = isPending
+        ? `<span class="badge badge-pending">候选中${d.total_candidates ? ' (' + d.total_candidates + ')' : ''}</span>`
+        : '';
+
+    const pendingStyle = isPending ? 'opacity: 0.75; border-color: #d97706;' : '';
+
+    return `
+        <div class="pipeline-card" data-comp-id="${d.component_id || ''}" style="${pendingStyle}">
+            <div class="pipeline-header">
+                <div class="pipeline-title">
+                    <span>${d.class_name || d.label || '未知构件'}</span>
+                    <span class="pipeline-id-tag">${d.component_id || d.track_id || ''}</span>
                 </div>
-                <div class="pipeline-steps">
-                    <div class="pipeline-step">
-                        <div class="pipeline-step-label"><span class="step-icon-inline">1</span>吊机检测</div>
-                        ${stepCrane}
-                    </div>
-                    <div class="pipeline-step">
-                        <div class="pipeline-step-label"><span class="step-icon-inline">2</span>检测范围</div>
-                        ${stepROI}
-                    </div>
-                    <div class="pipeline-step">
-                        <div class="pipeline-step-label"><span class="step-icon-inline">3</span>构件检测</div>
-                        ${stepDetect}
-                    </div>
-                    <div class="pipeline-step">
-                        <div class="pipeline-step-label"><span class="step-icon-inline">4</span>构件ROI</div>
-                        ${stepCompROI}
-                    </div>
-                </div>
-                <div class="pipeline-meta">
-                    <div class="pipeline-meta-item">帧号: ${d.frame}</div>
-                    <div class="pipeline-meta-item">ID: ${d.track_id || '-'}</div>
-                    ${matchDetail}
+                <div style="display:flex;gap:8px;align-items:center;">
+                    ${pendingBadge}
+                    <span class="badge ${detectorClass}">${detectorName}</span>
+                    <span class="badge ${confidenceClass}">${(d.confidence * 100).toFixed(1)}%</span>
                 </div>
             </div>
-        `;
-    }).join('');
+            <div class="pipeline-steps">
+                <div class="pipeline-step">
+                    <div class="pipeline-step-label"><span class="step-icon-inline">1</span>吊机检测</div>
+                    ${stepCrane}
+                </div>
+                <div class="pipeline-step">
+                    <div class="pipeline-step-label"><span class="step-icon-inline">2</span>检测范围</div>
+                    ${stepROI}
+                </div>
+                <div class="pipeline-step">
+                    <div class="pipeline-step-label"><span class="step-icon-inline">3</span>构件检测</div>
+                    ${stepDetect}
+                </div>
+                <div class="pipeline-step">
+                    <div class="pipeline-step-label"><span class="step-icon-inline">4</span>构件ROI</div>
+                    ${stepCompROI}
+                </div>
+            </div>
+            <div class="pipeline-meta">
+                <div class="pipeline-meta-item">帧号: ${d.frame}</div>
+                <div class="pipeline-meta-item">ID: ${d.track_id || '-'}</div>
+                ${matchDetail}
+            </div>
+        </div>
+    `;
+}
 
-    els.pipelineResults.insertAdjacentHTML('beforeend', cardsHtml);
-
+function attachLightboxListeners() {
     els.pipelineResults.querySelectorAll('.pipeline-step-image').forEach(el => {
+        if (el.dataset.lightboxBound) return;
+        el.dataset.lightboxBound = 'true';
         el.addEventListener('click', () => {
             const src = el.dataset.src;
             if (src) {

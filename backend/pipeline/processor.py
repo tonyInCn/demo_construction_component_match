@@ -6,7 +6,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from backend.config import ANNOTATED_DIR, BATCH_SIZE, FRAME_SAMPLE_RATE, ROIS_DIR
+from backend.config import ANNOTATED_DIR, BATCH_SIZE, CANDIDATE_WINDOW_FRAMES, FRAME_SAMPLE_RATE, ROIS_DIR
 from backend.logger import get_logger
 from backend.pipeline.model_detector import ModelDetector
 
@@ -75,6 +75,7 @@ class Processor:
             "last_step": "初始化",
             "unique_components": {},
             "unique_component_details": {},
+            "pending_components": {},
             "frame_results": [],
         }
         self._pipelines[pipeline_id] = pipeline
@@ -134,6 +135,8 @@ class Processor:
         if batch_frames:
             _flush_batch()
 
+        self._flush_all_pending(pipeline)
+
         if pipeline["status"] == "running":
             pipeline["status"] = "completed"
             logger.info(f"流水线 {pipeline_id} 处理完成, 共 {pipeline['current_frame']} 帧")
@@ -161,6 +164,9 @@ class Processor:
         all_detections = self.model_detector.detect_batch(frames, work_regions, step_callback=_step_cb)
         pipeline["last_step"] = "多方法构件检测完成"
 
+        pending = pipeline["pending_components"]
+        commit_window = CANDIDATE_WINDOW_FRAMES * FRAME_SAMPLE_RATE
+
         for i, frame in enumerate(frames):
             detections = all_detections[i] if i < len(all_detections) else []
             frame_num = frame_nums[i]
@@ -182,7 +188,6 @@ class Processor:
                     det["class_name"] = match["component_name"]
                     det["confidence"] = match["confidence"]
                     det["component_id"] = match["component_id"]
-                    pipeline["unique_components"][match["component_id"]] = match
 
                     logger.info(
                         f"构件匹配: {match['component_name']} | "
@@ -195,29 +200,54 @@ class Processor:
                         frame, det["bbox"], match["component_id"], pipeline_id, frame_num
                     )
 
-                    existing = pipeline["unique_component_details"].get(match["component_id"])
-                    if existing is None or match["confidence"] > existing.get("confidence", 0):
-                        pipeline["unique_component_details"][match["component_id"]] = {
-                            "track_id": track_id,
-                            "component_id": match["component_id"],
-                            "class_name": match["component_name"],
-                            "confidence": match["confidence"],
-                            "clip_score": match.get("clip_score"),
-                            "geometry_score": match.get("geometry_score"),
-                            "detector": det.get("detector", ""),
-                            "image_filename": f"{frame_base}.jpg",
-                            "crane_image_filename": crane_img,
-                            "roi_image_filename": roi_img,
-                            "component_roi_filename": comp_roi_thumb,
-                            "frame": frame_num,
-                            "bbox": det["bbox"],
+                    comp_id = match["component_id"]
+                    candidate = {
+                        "track_id": track_id,
+                        "component_id": comp_id,
+                        "class_name": match["component_name"],
+                        "confidence": match["confidence"],
+                        "clip_score": match.get("clip_score"),
+                        "geometry_score": match.get("geometry_score"),
+                        "detector": det.get("detector", ""),
+                        "image_filename": f"{frame_base}.jpg",
+                        "crane_image_filename": crane_img,
+                        "roi_image_filename": roi_img,
+                        "component_roi_filename": comp_roi_thumb,
+                        "frame": frame_num,
+                        "bbox": det["bbox"],
+                    }
+
+                    if comp_id not in pending:
+                        pending[comp_id] = {
+                            "component_id": comp_id,
+                            "component_name": match["component_name"],
+                            "first_frame": frame_num,
+                            "best_candidate": candidate,
+                            "candidates": [candidate],
                         }
+                        logger.info(
+                            f"构件候选已建立: {match['component_name']} | "
+                            f"起始帧={frame_num} | 初始置信度={match['confidence']:.3f}"
+                        )
+                    else:
+                        p = pending[comp_id]
+                        p["candidates"].append(candidate)
+                        if match["confidence"] > p["best_candidate"]["confidence"]:
+                            p["best_candidate"] = candidate
+                            logger.info(
+                                f"候选更新最佳: {match['component_name']} | "
+                                f"帧={frame_num} | 置信度={match['confidence']:.3f}"
+                            )
+
                 else:
                     det["class_name"] = det.get("label", "未知构件")
 
                 tracked.append(det)
 
-            pipeline["detections_count"] = len(pipeline["unique_components"])
+            self._commit_ready_candidates(pipeline, frame_num, commit_window)
+
+            total_components = len(pipeline["unique_components"]) + len(pipeline["pending_components"])
+            pipeline["detections_count"] = total_components
 
             annotated_frame = self._annotate_frame(frame.copy(), tracked, frame_num)
             self._save_annotated_frame(annotated_frame, pipeline_id, frame_num)
@@ -234,6 +264,52 @@ class Processor:
         pipeline["last_step"] = "构件匹配与判定完成"
         logger.info(f"批量处理完成, 共处理 {len(frames)} 帧")
 
+    def _commit_ready_candidates(self, pipeline, current_frame, commit_window):
+        pending = pipeline["pending_components"]
+        committed_ids = []
+
+        for comp_id, p in pending.items():
+            if current_frame >= p["first_frame"] + commit_window:
+                best = p["best_candidate"]
+                pipeline["unique_component_details"][comp_id] = best
+                pipeline["unique_components"][comp_id] = {
+                    "component_id": comp_id,
+                    "component_name": best["class_name"],
+                    "confidence": best["confidence"],
+                }
+                committed_ids.append(comp_id)
+                logger.info(
+                    f"构件提交最佳结果: {best['class_name']} | "
+                    f"候选数={len(p['candidates'])} | "
+                    f"最佳帧={best['frame']} | "
+                    f"置信度={best['confidence']:.3f}"
+                )
+
+        for cid in committed_ids:
+            del pending[cid]
+
+    def _flush_all_pending(self, pipeline):
+        pending = pipeline.get("pending_components", {})
+        if not pending:
+            return
+
+        for comp_id, p in pending.items():
+            best = p["best_candidate"]
+            pipeline["unique_component_details"][comp_id] = best
+            pipeline["unique_components"][comp_id] = {
+                "component_id": comp_id,
+                "component_name": best["class_name"],
+                "confidence": best["confidence"],
+            }
+            logger.info(
+                f"[flush] 构件提交: {best['class_name']} | "
+                f"候选数={len(p['candidates'])} | "
+                f"最佳帧={best['frame']} | "
+                f"置信度={best['confidence']:.3f}"
+            )
+
+        pending.clear()
+
     def stop_pipeline(self, pipeline_id: str):
         pipeline = self._pipelines.get(pipeline_id)
         if pipeline is None:
@@ -242,6 +318,7 @@ class Processor:
         pipeline["status"] = "stopped"
         if pipeline["cap"].isOpened():
             pipeline["cap"].release()
+        self._flush_all_pending(pipeline)
         logger.info(f"停止流水线: {pipeline_id}")
         return {"status": "stopped"}
 
@@ -273,6 +350,15 @@ class Processor:
         latest_frame = results[-1]["frame"] if results else 0
 
         components = list(pipeline.get("unique_component_details", {}).values())
+
+        pending = pipeline.get("pending_components", {})
+        for p in pending.values():
+            best = p["best_candidate"]
+            comp_copy = dict(best)
+            comp_copy["pending"] = True
+            comp_copy["total_candidates"] = len(p["candidates"])
+            components.append(comp_copy)
+
         components.sort(key=lambda c: c.get("frame", 0))
 
         return self._sanitize({
@@ -509,7 +595,7 @@ class Processor:
                 return None
 
             roi_h, roi_w = roi.shape[:2]
-            max_dim = 200
+            max_dim = 400
             scale = min(1.0, max_dim / max(roi_w, roi_h))
             if scale < 1.0:
                 roi = cv2.resize(roi, (int(roi_w * scale), int(roi_h * scale)))
