@@ -18,14 +18,22 @@ from backend.logger import get_logger
 logger = get_logger(__name__)
 
 COMPONENT_LIBRARY = [
-    {"id": "comp_001", "name": "预制柱-标准柱", "shape": "rect_vertical", "color": "gray", "threshold": 0.45},
-    {"id": "comp_005", "name": "预制梁-主梁", "shape": "rect_horizontal", "color": "gray", "threshold": 0.45},
-    {"id": "comp_012", "name": "预制板-楼板", "shape": "flat_large", "color": "light_gray", "threshold": 0.45},
-    {"id": "comp_023", "name": "预制墙板-外墙", "shape": "rect_vertical", "color": "textured", "threshold": 0.45},
-    {"id": "comp_034", "name": "预制楼梯", "shape": "stepped", "color": "gray", "threshold": 0.45},
-    {"id": "comp_041", "name": "预制节点-连接", "shape": "small_circle", "color": "metallic", "threshold": 0.45},
-    {"id": "comp_056", "name": "预制柱-顶层", "shape": "rect_vertical", "color": "gray", "threshold": 0.45},
-    {"id": "comp_067", "name": "预制墙-内墙", "shape": "rect_vertical", "color": "light", "threshold": 0.45},
+    {"id": "comp_001", "name": "预制柱-标准柱", "shape": "rect_vertical", "color": "gray",
+     "clip_text": "precast concrete column, vertical pillar, tall rectangular concrete structure", "threshold": 0.45},
+    {"id": "comp_005", "name": "预制梁-主梁", "shape": "rect_horizontal", "color": "gray",
+     "clip_text": "precast concrete beam, horizontal girder, long horizontal structural member", "threshold": 0.45},
+    {"id": "comp_012", "name": "预制板-楼板", "shape": "flat_large", "color": "light_gray",
+     "clip_text": "precast concrete slab, floor slab, flat large horizontal concrete surface, wide thin panel", "threshold": 0.45},
+    {"id": "comp_023", "name": "预制墙板-外墙", "shape": "rect_vertical", "color": "textured",
+     "clip_text": "precast concrete wall panel, exterior wall, textured vertical concrete wall", "threshold": 0.45},
+    {"id": "comp_034", "name": "预制楼梯", "shape": "stepped", "color": "gray",
+     "clip_text": "precast concrete staircase, stair steps, stepped structure, zigzag stairs with horizontal treads", "threshold": 0.45},
+    {"id": "comp_041", "name": "预制节点-连接", "shape": "small_circle", "color": "metallic",
+     "clip_text": "precast connection joint, small metallic connector, bolted connection, steel node", "threshold": 0.45},
+    {"id": "comp_056", "name": "预制柱-顶层", "shape": "rect_vertical", "color": "gray",
+     "clip_text": "precast concrete top column, vertical pillar top section, upper column", "threshold": 0.45},
+    {"id": "comp_067", "name": "预制墙-内墙", "shape": "rect_vertical", "color": "light",
+     "clip_text": "precast concrete interior wall, internal partition wall, smooth vertical wall panel", "threshold": 0.45},
 ]
 
 GROUNDING_PROMPTS = [
@@ -426,7 +434,7 @@ class ModelDetector:
 
             roi_image = PILImage.fromarray(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
 
-            texts = [c["name"] for c in COMPONENT_LIBRARY]
+            texts = [c.get("clip_text", c["name"]) for c in COMPONENT_LIBRARY]
             inputs = self.clip_processor(
                 text=texts,
                 images=roi_image,
@@ -438,10 +446,14 @@ class ModelDetector:
             with torch.no_grad():
                 outputs = self.clip_model(**inputs)
                 logits_per_image = outputs.logits_per_image[0]
-                probs = logits_per_image.softmax(dim=0).cpu().numpy()
+                clip_probs = logits_per_image.softmax(dim=0).cpu().numpy()
 
-            best_idx = np.argmax(probs)
-            best_score = float(probs[best_idx])
+            geometry_features = self._analyze_roi_geometry(roi)
+
+            fused_scores = self._fuse_scores(clip_probs, geometry_features)
+
+            best_idx = np.argmax(fused_scores)
+            best_score = float(fused_scores[best_idx])
 
             if best_score < CONFIDENCE_THRESHOLD:
                 return None
@@ -451,7 +463,112 @@ class ModelDetector:
                 "component_id": component["id"],
                 "component_name": component["name"],
                 "confidence": best_score,
+                "clip_score": float(clip_probs[best_idx]),
+                "geometry_score": float(fused_scores[best_idx] - clip_probs[best_idx]),
             }
         except Exception as e:
             logger.warning(f"CLIP 匹配异常: {e}")
             return None
+
+    def _analyze_roi_geometry(self, roi: np.ndarray) -> dict:
+        h, w = roi.shape[:2]
+        features = {
+            "aspect_ratio": w / max(h, 1),
+            "area_ratio": 1.0,
+            "step_score": 0.0,
+            "flat_score": 0.0,
+            "vertical_score": 0.0,
+            "horizontal_score": 0.0,
+            "edge_density": 0.0,
+            "contour_count": 0,
+            "has_stepped_pattern": False,
+            "shape_vertical": 0.0,
+            "shape_horizontal": 0.0,
+            "shape_flat_large": 0.0,
+            "shape_stepped": 0.0,
+            "shape_small_circle": 0.0,
+            "shape_rect_vertical": 0.0,
+        }
+
+        try:
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+            edges = cv2.Canny(gray, 50, 150)
+            edge_density = np.count_nonzero(edges) / max(w * h, 1)
+            features["edge_density"] = float(edge_density)
+
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            features["contour_count"] = len(contours)
+
+            approx_count = 0
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area < (w * h) * 0.01:
+                    continue
+                approx = cv2.approxPolyDP(cnt, 0.05 * cv2.arcLength(cnt, True), True)
+                if len(approx) <= 6:
+                    approx_count += 1
+
+            features["aspect_ratio"] = w / max(h, 1)
+
+            if h > 10 and w > 10:
+                row_means = np.mean(gray, axis=1)
+                row_diffs = np.abs(np.diff(row_means))
+                threshold = np.mean(row_diffs) + 2 * np.std(row_diffs)
+                significant_changes = np.sum(row_diffs > threshold)
+                features["step_score"] = float(min(significant_changes / max(h * 0.1, 1), 1.0))
+
+                step_rows = 0
+                for i in range(1, len(row_diffs)):
+                    if row_diffs[i] > threshold and abs(i - np.argmax(row_diffs)) > 3:
+                        step_rows += 1
+                features["has_stepped_pattern"] = step_rows >= 2
+                features["shape_stepped"] = float(min(step_rows / max(h * 0.05, 1), 1.0))
+
+            if features["aspect_ratio"] > 2.0:
+                features["flat_score"] = float(min((features["aspect_ratio"] - 2.0) / 3.0, 1.0))
+                features["shape_flat_large"] = features["flat_score"]
+
+            if features["aspect_ratio"] > 3.0 and edge_density < 0.15:
+                features["shape_flat_large"] = float(min(features["shape_flat_large"] + 0.3, 1.0))
+
+            if features["aspect_ratio"] < 0.6:
+                features["vertical_score"] = float(min((0.6 - features["aspect_ratio"]) / 0.4, 1.0))
+                features["shape_vertical"] = features["vertical_score"]
+                features["shape_rect_vertical"] = features["vertical_score"]
+
+            if features["aspect_ratio"] > 1.5 and features["aspect_ratio"] <= 3.0:
+                features["horizontal_score"] = float(min((features["aspect_ratio"] - 1.5) / 1.5, 1.0))
+                features["shape_rect_vertical"] = features["horizontal_score"] * 0.5
+
+            if w * h < 8000:
+                features["shape_small_circle"] = float(min(1.0 - (w * h) / 8000, 1.0))
+
+            if features["has_stepped_pattern"]:
+                features["shape_stepped"] = float(min(features["shape_stepped"] + 0.4, 1.0))
+                features["shape_flat_large"] *= 0.3
+
+        except Exception as e:
+            logger.warning(f"ROI几何分析异常: {e}")
+
+        return features
+
+    def _fuse_scores(self, clip_probs: np.ndarray, geometry_features: dict) -> np.ndarray:
+        fused = clip_probs.copy()
+        geometry_weight = 0.35
+
+        shape_scores = {
+            "rect_vertical": geometry_features.get("shape_rect_vertical", 0.0),
+            "rect_horizontal": geometry_features.get("horizontal_score", 0.0),
+            "flat_large": geometry_features.get("shape_flat_large", 0.0),
+            "stepped": geometry_features.get("shape_stepped", 0.0),
+            "small_circle": geometry_features.get("shape_small_circle", 0.0),
+        }
+
+        for idx, component in enumerate(COMPONENT_LIBRARY):
+            shape = component.get("shape", "")
+            geo_score = shape_scores.get(shape, 0.0)
+            fused[idx] = (1 - geometry_weight) * clip_probs[idx] + geometry_weight * geo_score
+
+        fused = fused / fused.sum()
+        return fused

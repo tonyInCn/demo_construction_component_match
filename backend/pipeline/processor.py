@@ -156,6 +156,13 @@ class Processor:
                     det["component_id"] = match["component_id"]
                     pipeline["unique_components"][match["component_id"]] = match
 
+                    logger.info(
+                        f"构件匹配: {match['component_name']} | "
+                        f"置信度={match['confidence']:.3f} | "
+                        f"CLIP分={match.get('clip_score', 0):.3f} | "
+                        f"几何分={match.get('geometry_score', 0):.3f}"
+                    )
+
                     comp_roi_thumb = self._save_component_roi_crop(
                         frame, det["bbox"], match["component_id"], pipeline_id, frame_num
                     )
@@ -167,6 +174,8 @@ class Processor:
                             "component_id": match["component_id"],
                             "class_name": match["component_name"],
                             "confidence": match["confidence"],
+                            "clip_score": match.get("clip_score"),
+                            "geometry_score": match.get("geometry_score"),
                             "detector": det.get("detector", ""),
                             "image_filename": f"{frame_base}.jpg",
                             "crane_image_filename": crane_img,

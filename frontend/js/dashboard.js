@@ -381,6 +381,14 @@ function renderDetections(detections) {
                </div>`
             : `<div class="pipeline-step-placeholder">构件ROI<br>无数据</div>`;
 
+        const matchDetail = (d.clip_score != null || d.geometry_score != null)
+            ? `<div class="pipeline-meta-item">
+                 ${d.clip_score != null ? `CLIP: ${(d.clip_score * 100).toFixed(1)}%` : ''}
+                 ${d.clip_score != null && d.geometry_score != null ? ' | ' : ''}
+                 ${d.geometry_score != null ? `几何: ${(d.geometry_score * 100).toFixed(1)}%` : ''}
+               </div>`
+            : '';
+
         return `
             <div class="pipeline-card">
                 <div class="pipeline-header">
@@ -414,6 +422,7 @@ function renderDetections(detections) {
                 <div class="pipeline-meta">
                     <div class="pipeline-meta-item">帧号: ${d.frame}</div>
                     <div class="pipeline-meta-item">ID: ${d.track_id || '-'}</div>
+                    ${matchDetail}
                 </div>
             </div>
         `;
