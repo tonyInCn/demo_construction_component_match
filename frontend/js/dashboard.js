@@ -338,10 +338,11 @@ function renderDetections(detections) {
     const pendingById = {};
     const committedById = {};
     detections.forEach(d => {
+        const key = d.candidate_id || d.component_id;
         if (d.pending) {
-            pendingById[d.component_id] = d;
+            pendingById[key] = d;
         } else {
-            committedById[d.component_id] = d;
+            committedById[key] = d;
         }
     });
 
@@ -357,14 +358,14 @@ function renderDetections(detections) {
         if (!state.displayedComponentIds.has(compId)) {
             state.displayedComponentIds.add(compId);
             const d = committedById[compId] || pendingById[compId];
-            const cardHtml = buildCardHtml(d, false);
+            const cardHtml = buildCardHtml(d, false, compId);
             els.pipelineResults.insertAdjacentHTML('beforeend', cardHtml);
             attachLightboxListeners();
         } else {
             const d = committedById[compId] || pendingById[compId];
             const cardEl = document.querySelector(`[data-comp-id="${compId}"]`);
             if (cardEl) {
-                const newHtml = buildCardHtml(d, !isCommitted);
+                const newHtml = buildCardHtml(d, !isCommitted, compId);
                 const temp = document.createElement('div');
                 temp.innerHTML = newHtml;
                 cardEl.replaceWith(temp.firstElementChild);
@@ -374,7 +375,7 @@ function renderDetections(detections) {
     });
 }
 
-function buildCardHtml(d, isPending) {
+function buildCardHtml(d, isPending, compId) {
     const confidenceClass = d.confidence >= 0.7 ? 'badge-green' : (d.confidence >= 0.5 ? 'badge-yellow' : 'badge-red');
     const detectorClass = d.detector === 'grounding_dino' ? 'badge-blue' : 'badge-yellow';
     const detectorName = d.detector === 'grounding_dino' ? 'GroundingDINO' : (d.detector === 'traditional_cv' ? '传统CV' : (d.detector || '-'));
@@ -424,7 +425,7 @@ function buildCardHtml(d, isPending) {
     const pendingStyle = isPending ? 'opacity: 0.75; border-color: #d97706;' : '';
 
     return `
-        <div class="pipeline-card" data-comp-id="${d.component_id || ''}" style="${pendingStyle}">
+        <div class="pipeline-card" data-comp-id="${compId || d.component_id || ''}" style="${pendingStyle}">
             <div class="pipeline-header">
                 <div class="pipeline-title">
                     <span>${d.class_name || d.label || '未知构件'}</span>
