@@ -19,6 +19,34 @@ class Processor:
         self._pipelines = {}
         self._threads = {}
 
+    @staticmethod
+    def _sanitize(obj):
+        if isinstance(obj, dict):
+            return {k: Processor._sanitize(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [Processor._sanitize(v) for v in obj]
+        elif isinstance(obj, (np.floating, np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, (np.integer, np.int32, np.int64)):
+            return int(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, float):
+            return float(obj)
+        elif isinstance(obj, int):
+            return int(obj)
+        elif isinstance(obj, str):
+            return obj
+        elif isinstance(obj, bool):
+            return obj
+        elif obj is None:
+            return None
+        else:
+            try:
+                return float(obj)
+            except (TypeError, ValueError):
+                return str(obj)
+
     def start_pipeline(self, video_path: str, device: str = "cuda"):
         pipeline_id = str(uuid.uuid4())
         logger.info(f"启动检测流水线: {pipeline_id}, 视频: {video_path}")
@@ -28,7 +56,7 @@ class Processor:
             raise ValueError(f"无法打开视频: {video_path}")
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
@@ -225,16 +253,16 @@ class Processor:
         elapsed = time.time() - pipeline["start_time"]
         progress = (pipeline["current_frame"] / max(pipeline["total_frames"], 1)) * 100
 
-        return {
+        return self._sanitize({
             "status": pipeline["status"],
-            "current_frame": pipeline["current_frame"],
-            "total_frames": pipeline["total_frames"],
-            "progress": round(progress, 1),
-            "fps": pipeline["fps"],
-            "detections_count": pipeline["detections_count"],
+            "current_frame": int(pipeline["current_frame"]),
+            "total_frames": int(pipeline["total_frames"]),
+            "progress": round(float(progress), 1),
+            "fps": float(pipeline["fps"]),
+            "detections_count": int(pipeline["detections_count"]),
             "elapsed_time": f"{int(elapsed * 1000)}ms",
             "last_step": pipeline["last_step"],
-        }
+        })
 
     def get_frame_results(self, pipeline_id: str):
         pipeline = self._pipelines.get(pipeline_id)
@@ -247,11 +275,11 @@ class Processor:
         components = list(pipeline.get("unique_component_details", {}).values())
         components.sort(key=lambda c: c.get("frame", 0))
 
-        return {
+        return self._sanitize({
             "frame": latest_frame,
             "image_filename": results[-1].get("image_filename") if results else None,
             "detections": components,
-        }
+        })
 
     def _detect_crane(self, frame: np.ndarray) -> Optional[np.ndarray]:
         try:
