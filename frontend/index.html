@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>建筑构件识别系统</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>建筑构件识别系统</h1>
+            <div class="status-indicator">
+                <div id="statusDot" class="status-dot"></div>
+                <span id="statusText">初始化中...</span>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="panel video-section">
+                <h2>视频检测</h2>
+                <div class="video-container" id="videoContainer">
+                    <div class="loading-overlay" id="loadingOverlay">
+                        <div class="spinner"></div>
+                        <div id="loadingText">初始化中...</div>
+                    </div>
+                    <div id="videoPlaceholder" class="video-placeholder">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                        </svg>
+                        <div>请选择视频文件开始检测</div>
+                    </div>
+                    <video id="video" controls style="display:none;"></video>
+                </div>
+                <div class="controls">
+                    <button class="btn btn-primary" id="btnSelect">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                        </svg>
+                        选择
+                    </button>
+                    <input type="file" id="fileInput" class="btn-file" accept="video/*">
+                    <button class="btn btn-success" id="btnStart" disabled>▶ 开始运行</button>
+                    <button class="btn btn-danger" id="btnStop" style="display:none;">■ 停止</button>
+                </div>
+
+                <div class="progress-section">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <div class="progress-info">
+                        <span id="progressText">0%</span>
+                        <span id="progressFrame">帧: 0/0</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>检测详情</h2>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="uniqueCount">0</div>
+                        <div class="stat-label">唯一构件</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="currentFps">0</div>
+                        <div class="stat-label">处理帧率 (fps)</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="elapsedTime">0</div>
+                        <div class="stat-label">累计耗时</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="progressPercent">0%</div>
+                        <div class="stat-label">检测进度</div>
+                    </div>
+                </div>
+
+                <div style="margin-top:20px;">
+                    <h3 style="font-size:0.9rem;color:#94a3b8;margin-bottom:12px;">模型状态</h3>
+                    <div class="model-info">
+                        <div>系统: <span id="modelInitialized" class="badge badge-red">未就绪</span></div>
+                        <div>GroundingDINO: <span id="modelGroundingDino" class="badge badge-red">未加载</span></div>
+                        <div>CLIP: <span id="modelClip" class="badge badge-red">未加载</span></div>
+                        <div>加载进度: <span id="modelLoadProgress">0%</span></div>
+                    </div>
+                </div>
+
+                <div class="detection-steps" id="detectionSteps" style="margin-top:20px;"></div>
+
+                <div style="margin-top:20px;">
+                    <h3 style="font-size:0.9rem;color:#94a3b8;margin-bottom:12px;">检测结果</h3>
+                    <table class="detections-table" id="detectionsTable">
+                        <tr>
+                            <th>ID</th>
+                            <th>构件名称</th>
+                            <th>置信度</th>
+                            <th>检测器</th>
+                        </tr>
+                        <tr>
+                            <td colspan="4" style="text-align:center;color:#64748b;padding:20px;">暂无检测结果</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/api.js"></script>
+    <script src="/js/dashboard.js"></script>
+</body>
+</html>
