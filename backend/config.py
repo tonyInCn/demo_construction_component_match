@@ -1,4 +1,8 @@
+import os
 from pathlib import Path
+
+HF_ENDPOINT = "https://hf-mirror.com"
+os.environ.setdefault("HF_ENDPOINT", HF_ENDPOINT)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
