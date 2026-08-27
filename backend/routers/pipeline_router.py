@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from backend.config import (
     ANNOTATED_DIR,
     MAX_FILE_SIZE,
+    ROIS_DIR,
     SUPPORTED_EXTENSIONS,
     UPLOAD_DIR,
 )
@@ -149,6 +150,16 @@ async def get_annotated_image(filename: str):
     from fastapi.responses import FileResponse
 
     safe_name = Path(filename).name
+
+    if safe_name.startswith("comp_") or safe_name.endswith(".jpg") and "_comp_" in safe_name:
+        path = ROIS_DIR / safe_name
+        if path.exists():
+            return FileResponse(
+                path=str(path),
+                media_type="image/jpeg",
+                filename=safe_name,
+            )
+
     path = ANNOTATED_DIR / safe_name
     if not path.exists():
         raise HTTPException(status_code=404, detail="图片不存在")

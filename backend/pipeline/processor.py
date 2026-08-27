@@ -46,6 +46,7 @@ class Processor:
             "start_time": time.time(),
             "last_step": "初始化",
             "unique_components": {},
+            "unique_component_details": {},
             "frame_results": [],
         }
         self._pipelines[pipeline_id] = pipeline
@@ -135,6 +136,12 @@ class Processor:
         for i, frame in enumerate(frames):
             detections = all_detections[i] if i < len(all_detections) else []
             frame_num = frame_nums[i]
+            work_region = work_regions[i]
+
+            frame_base = f"{pipeline_id}_frame_{frame_num:06d}"
+
+            crane_img = self._save_crane_visualization(frame.copy(), work_region, frame_num, pipeline_id)
+            roi_img = self._save_roi_visualization(frame.copy(), work_region, frame_num, pipeline_id)
 
             tracked = []
             for det in detections:
@@ -148,6 +155,26 @@ class Processor:
                     det["confidence"] = match["confidence"]
                     det["component_id"] = match["component_id"]
                     pipeline["unique_components"][match["component_id"]] = match
+
+                    comp_roi_thumb = self._save_component_roi_crop(
+                        frame, det["bbox"], match["component_id"], pipeline_id, frame_num
+                    )
+
+                    existing = pipeline["unique_component_details"].get(match["component_id"])
+                    if existing is None or match["confidence"] > existing.get("confidence", 0):
+                        pipeline["unique_component_details"][match["component_id"]] = {
+                            "track_id": track_id,
+                            "component_id": match["component_id"],
+                            "class_name": match["component_name"],
+                            "confidence": match["confidence"],
+                            "detector": det.get("detector", ""),
+                            "image_filename": f"{frame_base}.jpg",
+                            "crane_image_filename": crane_img,
+                            "roi_image_filename": roi_img,
+                            "component_roi_filename": comp_roi_thumb,
+                            "frame": frame_num,
+                            "bbox": det["bbox"],
+                        }
                 else:
                     det["class_name"] = det.get("label", "未知构件")
 
@@ -157,11 +184,10 @@ class Processor:
 
             annotated_frame = self._annotate_frame(frame.copy(), tracked, frame_num)
             self._save_annotated_frame(annotated_frame, pipeline_id, frame_num)
-            image_filename = f"{pipeline_id}_frame_{frame_num:06d}.jpg"
 
             pipeline["frame_results"].append({
                 "frame": frame_num,
-                "image_filename": image_filename,
+                "image_filename": f"{frame_base}.jpg",
                 "detections": tracked,
             })
 
@@ -207,14 +233,16 @@ class Processor:
             return {"error": "Pipeline not found"}
 
         results = pipeline.get("frame_results", [])
-        if results:
-            latest = results[-1]
-            return {
-                "frame": latest["frame"],
-                "image_filename": latest.get("image_filename"),
-                "detections": latest["detections"],
-            }
-        return {"frame": 0, "image_filename": None, "detections": []}
+        latest_frame = results[-1]["frame"] if results else 0
+
+        components = list(pipeline.get("unique_component_details", {}).values())
+        components.sort(key=lambda c: c.get("frame", 0))
+
+        return {
+            "frame": latest_frame,
+            "image_filename": results[-1].get("image_filename") if results else None,
+            "detections": components,
+        }
 
     def _detect_crane(self, frame: np.ndarray) -> Optional[np.ndarray]:
         try:
@@ -301,6 +329,168 @@ class Processor:
             cv2.imwrite(str(filepath), frame)
         except Exception as e:
             logger.warning(f"保存标注帧失败: {e}")
+
+    def _save_crane_visualization(self, frame: np.ndarray, work_region, frame_num: int, pipeline_id: str) -> Optional[str]:
+        try:
+            H, W = frame.shape[:2]
+
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            yellow_lower = np.array([18, 80, 100])
+            yellow_upper = np.array([38, 255, 255])
+            orange_lower = np.array([5, 100, 100])
+            orange_upper = np.array([18, 255, 255])
+            red_lower1 = np.array([0, 100, 100])
+            red_upper1 = np.array([5, 255, 255])
+            red_lower2 = np.array([160, 100, 100])
+            red_upper2 = np.array([180, 255, 255])
+
+            mask_yellow = cv2.inRange(hsv, yellow_lower, yellow_upper)
+            mask_orange = cv2.inRange(hsv, orange_lower, orange_upper)
+            mask_red1 = cv2.inRange(hsv, red_lower1, red_upper1)
+            mask_red2 = cv2.inRange(hsv, red_lower2, red_upper2)
+
+            combined_mask = cv2.bitwise_or(mask_yellow, mask_orange)
+            combined_mask = cv2.bitwise_or(combined_mask, mask_red1)
+            combined_mask = cv2.bitwise_or(combined_mask, mask_red2)
+
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+            overlay = frame.copy()
+
+            contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            min_area = (W * H) * 0.005
+
+            crane_contours = []
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area > min_area:
+                    crane_contours.append(contour)
+                    x, y, cw, ch = cv2.boundingRect(contour)
+                    cx, cy = x + cw // 2, y + ch // 2
+                    radius = max(cw, ch) // 2 + 10
+
+                    cv2.circle(overlay, (cx, cy), radius, (0, 0, 255), 3)
+                    cv2.circle(overlay, (cx, cy), radius, (255, 255, 255), 1)
+
+                    if len(contour) >= 5:
+                        ellipse = cv2.fitEllipse(contour)
+                        cv2.ellipse(overlay, ellipse, (0, 255, 255), 2)
+
+                    cv2.drawContours(overlay, [contour], -1, (0, 255, 0), 2)
+
+                    label_x = x
+                    label_y = max(20, y - 12)
+                    label = "CRANE"
+                    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+                    cv2.rectangle(overlay, (label_x - 4, label_y - th - 6), (label_x + tw + 4, label_y + 2), (0, 0, 255), -1)
+                    cv2.putText(overlay, label, (label_x, label_y - 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+
+            if not crane_contours:
+                cv2.putText(overlay, "No Crane Detected", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+            if work_region is not None:
+                pts = work_region.astype(np.int32)
+                cv2.polylines(overlay, [pts], True, (0, 255, 0), 3)
+                cx = int(np.mean(pts[:, 0]))
+                cy = int(np.mean(pts[:, 1]))
+                cv2.putText(overlay, "Work Region", (cx - 40, cy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+            cv2.putText(overlay, f"Frame: {frame_num} | Crane Detection", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+
+            ANNOTATED_DIR.mkdir(parents=True, exist_ok=True)
+            filename = f"{pipeline_id}_crane_{frame_num:06d}.jpg"
+            filepath = ANNOTATED_DIR / filename
+            cv2.imwrite(str(filepath), overlay)
+            return filename
+        except Exception as e:
+            logger.warning(f"保存吊机可视化失败: {e}")
+            return None
+
+    def _save_roi_visualization(self, frame: np.ndarray, work_region, frame_num: int, pipeline_id: str) -> Optional[str]:
+        try:
+            H, W = frame.shape[:2]
+
+            overlay = frame.copy()
+
+            if work_region is not None:
+                x_min = max(0, int(work_region[0][0]))
+                y_min = max(0, int(work_region[0][1]))
+                x_max = min(W, int(work_region[2][0]))
+                y_max = min(H, int(work_region[2][1]))
+
+                roi_layer = np.zeros_like(frame)
+                roi_layer[y_min:y_max, x_min:x_max] = [255, 200, 0]
+
+                overlay = cv2.addWeighted(overlay, 0.55, roi_layer, 0.45, 0)
+
+                cv2.rectangle(overlay, (x_min, y_min), (x_max, y_max), (255, 200, 0), 3)
+
+                pts = work_region.astype(np.int32)
+                cv2.polylines(overlay, [pts], True, (0, 255, 0), 2)
+
+                roi_w = x_max - x_min
+                roi_h = y_max - y_min
+                label = f"ROI: {roi_w}x{roi_h}"
+                cv2.putText(overlay, label, (x_min + 5, y_min - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 200, 0), 2)
+            else:
+                cv2.putText(overlay, "No Crane Detected | Full Frame Scan", (10, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+            cv2.putText(overlay, f"Frame: {frame_num} | Detection ROI", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+
+            ANNOTATED_DIR.mkdir(parents=True, exist_ok=True)
+            filename = f"{pipeline_id}_roi_{frame_num:06d}.jpg"
+            filepath = ANNOTATED_DIR / filename
+            cv2.imwrite(str(filepath), overlay)
+            return filename
+        except Exception as e:
+            logger.warning(f"保存ROI可视化失败: {e}")
+            return None
+
+    def _save_component_roi_crop(self, frame: np.ndarray, bbox, component_id: str, pipeline_id: str, frame_num: int) -> Optional[str]:
+        try:
+            x, y, w, h = bbox
+            H, W = frame.shape[:2]
+
+            pad_x = int(w * 0.15)
+            pad_y = int(h * 0.15)
+            x1 = max(0, x - pad_x)
+            y1 = max(0, y - pad_y)
+            x2 = min(W, x + w + pad_x)
+            y2 = min(H, y + h + pad_y)
+
+            roi = frame[y1:y2, x1:x2].copy()
+            if roi.size == 0:
+                return None
+
+            roi_h, roi_w = roi.shape[:2]
+            max_dim = 200
+            scale = min(1.0, max_dim / max(roi_w, roi_h))
+            if scale < 1.0:
+                roi = cv2.resize(roi, (int(roi_w * scale), int(roi_h * scale)))
+
+            cv2.rectangle(roi, (0, 0), (roi.shape[1] - 1, roi.shape[0] - 1), (0, 255, 255), 2)
+
+            short_id = component_id.split("_")[-1] if "_" in component_id else component_id[:6]
+            cv2.putText(roi, f"#{short_id}", (5, 18),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+            ROIS_DIR.mkdir(parents=True, exist_ok=True)
+            filename = f"{pipeline_id}_comp_{frame_num:06d}_{short_id}.jpg"
+            filepath = ROIS_DIR / filename
+            cv2.imwrite(str(filepath), roi)
+            return filename
+        except Exception as e:
+            logger.warning(f"保存构件ROI裁剪失败: {e}")
+            return None
 
     def cleanup(self):
         for pid, pipeline in self._pipelines.items():

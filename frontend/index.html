@@ -31,6 +31,12 @@
                         <div>请选择视频文件开始检测</div>
                     </div>
                     <video id="video" controls style="display:none;"></video>
+                    <div id="frameOverlay" class="frame-overlay" style="display:none;">
+                        <img id="frameOverlayImg" alt="检测帧">
+                        <div class="frame-overlay-label">
+                            <span id="frameOverlayLabel">检测帧</span>
+                        </div>
+                    </div>
                 </div>
                 <div class="controls">
                     <button class="btn btn-primary" id="btnSelect">
@@ -45,12 +51,16 @@
                 </div>
 
                 <div class="progress-section">
-                    <div class="progress-bar">
+                    <div class="progress-bar" id="progressBar">
                         <div class="progress-fill" id="progressFill"></div>
+                        <div class="progress-frame-marker" id="progressFrameMarker" style="left:0%;"></div>
+                        <div class="progress-hover-indicator" id="progressHover"></div>
+                        <div class="progress-tooltip" id="progressTooltip">00:00 / 00:00</div>
                     </div>
                     <div class="progress-info">
                         <span id="progressText">0%</span>
                         <span id="progressFrame">帧: 0/0</span>
+                        <span id="progressTime">00:00 / 00:00</span>
                     </div>
                 </div>
 
@@ -87,22 +97,11 @@
                     </div>
                 </div>
 
-                <div class="detection-steps" id="detectionSteps" style="margin-top:20px;"></div>
-
                 <div style="margin-top:20px;">
                     <h3 style="font-size:0.9rem;color:#94a3b8;margin-bottom:12px;">检测结果</h3>
-                    <table class="detections-table" id="detectionsTable">
-                        <tr>
-                            <th>缩略图</th>
-                            <th>ID</th>
-                            <th>构件名称</th>
-                            <th>置信度</th>
-                            <th>检测器</th>
-                        </tr>
-                        <tr>
-                            <td colspan="5" style="text-align:center;color:#64748b;padding:20px;">暂无检测结果</td>
-                        </tr>
-                    </table>
+                    <div class="pipeline-results" id="pipelineResults">
+                        <div class="pipeline-empty">暂无检测结果</div>
+                    </div>
                 </div>
             </div>
         </div>
