@@ -20,20 +20,18 @@ class Processor:
         self._threads = {}
 
     @staticmethod
-    def _iou(bbox1, bbox2):
-        x1, y1, w1, h1 = bbox1
-        x2, y2, w2, h2 = bbox2
-        xi1 = max(x1, x2)
-        yi1 = max(y1, y2)
-        xi2 = min(x1 + w1, x2 + w2)
-        yi2 = min(y1 + h1, y2 + h2)
-        inter = max(0, xi2 - xi1) * max(0, yi2 - yi1)
-        area1 = w1 * h1
-        area2 = w2 * h2
-        union = area1 + area2 - inter
-        if union <= 0:
-            return 0.0
-        return inter / union
+    def _iou(box_a, box_b):
+        ax, ay, aw, ah = box_a
+        bx, by, bw, bh = box_b
+        x1 = max(ax, bx)
+        y1 = max(ay, by)
+        x2 = min(ax + aw, bx + bw)
+        y2 = min(ay + ah, by + bh)
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        area_a = aw * ah
+        area_b = bw * bh
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
 
     @staticmethod
     def _sanitize(obj):
@@ -193,6 +191,7 @@ class Processor:
             crane_img = self._save_crane_visualization(frame.copy(), work_region, frame_num, pipeline_id)
             roi_img = self._save_roi_visualization(frame.copy(), work_region, frame_num, pipeline_id)
 
+            matched_candidates = []
             tracked = []
             for det in detections:
                 track_id = str(uuid.uuid4())[:8]
@@ -216,10 +215,9 @@ class Processor:
                         frame, det["bbox"], match["component_id"], pipeline_id, frame_num
                     )
 
-                    comp_id = match["component_id"]
                     candidate = {
                         "track_id": track_id,
-                        "component_id": comp_id,
+                        "component_id": match["component_id"],
                         "class_name": match["component_name"],
                         "confidence": match["confidence"],
                         "clip_score": match.get("clip_score"),
@@ -232,44 +230,70 @@ class Processor:
                         "frame": frame_num,
                         "bbox": det["bbox"],
                     }
-
-                    matched_candidate_id = None
-                    for cid, p in pending.items():
-                        iou_val = self._iou(det["bbox"], p["best_candidate"]["bbox"])
-                        if iou_val >= 0.5:
-                            matched_candidate_id = cid
-                            break
-
-                    if matched_candidate_id is None:
-                        new_cid = str(uuid.uuid4())[:8]
-                        pending[new_cid] = {
-                            "candidate_id": new_cid,
-                            "component_id": comp_id,
-                            "component_name": match["component_name"],
-                            "first_frame": frame_num,
-                            "best_candidate": candidate,
-                            "candidates": [candidate],
-                        }
-                        logger.info(
-                            f"构件候选已建立(IoU匹配): {match['component_name']} | "
-                            f"起始帧={frame_num} | 初始置信度={match['confidence']:.3f}"
-                        )
-                    else:
-                        p = pending[matched_candidate_id]
-                        p["candidates"].append(candidate)
-                        if match["confidence"] > p["best_candidate"]["confidence"]:
-                            p["best_candidate"] = candidate
-                            p["component_id"] = comp_id
-                            p["component_name"] = match["component_name"]
-                            logger.info(
-                                f"候选更新最佳(IoU匹配): {match['component_name']} | "
-                                f"帧={frame_num} | 置信度={match['confidence']:.3f}"
-                            )
-
+                    matched_candidates.append(candidate)
                 else:
                     det["class_name"] = det.get("label", "未知构件")
 
                 tracked.append(det)
+
+            deduped = []
+            used = [False] * len(matched_candidates)
+            for ci, cand in enumerate(matched_candidates):
+                if used[ci]:
+                    continue
+                best_idx = ci
+                for cj in range(ci + 1, len(matched_candidates)):
+                    if used[cj]:
+                        continue
+                    if self._iou(matched_candidates[best_idx]["bbox"], matched_candidates[cj]["bbox"]) >= 0.4:
+                        used[cj] = True
+                        if matched_candidates[cj]["confidence"] > matched_candidates[best_idx]["confidence"]:
+                            used[best_idx] = True
+                            best_idx = cj
+                deduped.append(matched_candidates[best_idx])
+
+            committed_details = pipeline.get("unique_component_details", {})
+            for cand in deduped:
+                bb = cand["bbox"]
+
+                skip = False
+                for _, committed in committed_details.items():
+                    if self._iou(bb, committed.get("bbox", [0, 0, 0, 0])) >= 0.4:
+                        skip = True
+                        break
+                if skip:
+                    logger.info(f"跳过已提交构件 (IoU>=0.4): {cand['class_name']} 帧={frame_num}")
+                    continue
+
+                matched_pending_id = None
+                for pid, p in pending.items():
+                    if self._iou(bb, p["best_candidate"]["bbox"]) >= 0.4:
+                        matched_pending_id = pid
+                        break
+
+                if matched_pending_id:
+                    p = pending[matched_pending_id]
+                    p["candidates"].append(cand)
+                    if cand["confidence"] > p["best_candidate"]["confidence"]:
+                        p["best_candidate"] = cand
+                        p["component_name"] = cand["class_name"]
+                        logger.info(
+                            f"候选更新最佳: {cand['class_name']} | "
+                            f"帧={frame_num} | 置信度={cand['confidence']:.3f}"
+                        )
+                else:
+                    new_id = str(uuid.uuid4())[:8]
+                    pending[new_id] = {
+                        "component_id": cand["component_id"],
+                        "component_name": cand["class_name"],
+                        "first_frame": frame_num,
+                        "best_candidate": cand,
+                        "candidates": [cand],
+                    }
+                    logger.info(
+                        f"构件候选已建立: {cand['class_name']} | "
+                        f"起始帧={frame_num} | 初始置信度={cand['confidence']:.3f}"
+                    )
 
             self._commit_ready_candidates(pipeline, frame_num, commit_window)
 
@@ -295,19 +319,18 @@ class Processor:
         pending = pipeline["pending_components"]
         committed_ids = []
 
-        for cid, p in pending.items():
+        for comp_id, p in pending.items():
             if current_frame >= p["first_frame"] + commit_window:
                 best = p["best_candidate"]
-                pipeline["unique_component_details"][cid] = best
-                pipeline["unique_components"][cid] = {
-                    "candidate_id": cid,
-                    "component_id": p["component_id"],
-                    "component_name": p["component_name"],
+                pipeline["unique_component_details"][comp_id] = best
+                pipeline["unique_components"][comp_id] = {
+                    "component_id": comp_id,
+                    "component_name": best["class_name"],
                     "confidence": best["confidence"],
                 }
-                committed_ids.append(cid)
+                committed_ids.append(comp_id)
                 logger.info(
-                    f"构件提交最佳结果: {p['component_name']} | "
+                    f"构件提交最佳结果: {best['class_name']} | "
                     f"候选数={len(p['candidates'])} | "
                     f"最佳帧={best['frame']} | "
                     f"置信度={best['confidence']:.3f}"
@@ -321,17 +344,16 @@ class Processor:
         if not pending:
             return
 
-        for cid, p in pending.items():
+        for comp_id, p in pending.items():
             best = p["best_candidate"]
-            pipeline["unique_component_details"][cid] = best
-            pipeline["unique_components"][cid] = {
-                "candidate_id": cid,
-                "component_id": p["component_id"],
-                "component_name": p["component_name"],
+            pipeline["unique_component_details"][comp_id] = best
+            pipeline["unique_components"][comp_id] = {
+                "component_id": comp_id,
+                "component_name": best["class_name"],
                 "confidence": best["confidence"],
             }
             logger.info(
-                f"[flush] 构件提交: {p['component_name']} | "
+                f"[flush] 构件提交: {best['class_name']} | "
                 f"候选数={len(p['candidates'])} | "
                 f"最佳帧={best['frame']} | "
                 f"置信度={best['confidence']:.3f}"
@@ -381,11 +403,10 @@ class Processor:
         components = list(pipeline.get("unique_component_details", {}).values())
 
         pending = pipeline.get("pending_components", {})
-        for cid, p in pending.items():
+        for p in pending.values():
             best = p["best_candidate"]
             comp_copy = dict(best)
             comp_copy["pending"] = True
-            comp_copy["candidate_id"] = cid
             comp_copy["total_candidates"] = len(p["candidates"])
             components.append(comp_copy)
 
