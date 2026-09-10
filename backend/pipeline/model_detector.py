@@ -185,13 +185,33 @@ class ModelDetector:
         if step_callback:
             step_callback("GroundingDINO检测")
 
-        h_list = [f.shape[0] for f in frames]
-        w_list = [f.shape[1] for f in frames]
+        cropped_frames = []
+        offsets = []
+        for frame, wr in zip(frames, work_regions):
+            if wr is not None:
+                h, w = frame.shape[:2]
+                x_min = max(0, int(wr[0][0]))
+                y_min = max(0, int(wr[0][1]))
+                x_max = min(w, int(wr[2][0]))
+                y_max = min(h, int(wr[2][1]))
+                cropped = frame[y_min:y_max, x_min:x_max]
+                if cropped.size > 0:
+                    cropped_frames.append(cropped)
+                    offsets.append((x_min, y_min))
+                else:
+                    cropped_frames.append(frame)
+                    offsets.append((0, 0))
+            else:
+                cropped_frames.append(frame)
+                offsets.append((0, 0))
 
-        batch_dino = self._detect_grounding_dino_batch(frames, w_list, h_list)
+        h_list = [f.shape[0] for f in cropped_frames]
+        w_list = [f.shape[1] for f in cropped_frames]
+
+        batch_dino = self._detect_grounding_dino_batch(cropped_frames, w_list, h_list)
 
         all_detections = []
-        for i, frame in enumerate(frames):
+        for i, frame in enumerate(cropped_frames):
             detections = list(batch_dino[i]) if i < len(batch_dino) else []
 
             if step_callback and i == 0:
@@ -205,6 +225,13 @@ class ModelDetector:
             if step_callback and i == 0:
                 step_callback("NMS融合去重")
             detections = self._apply_nms(detections)
+
+            ox, oy = offsets[i]
+            for det in detections:
+                if ox != 0 or oy != 0:
+                    x, y, bw, bh = det["bbox"]
+                    det["bbox"] = [x + ox, y + oy, bw, bh]
+
             all_detections.append(detections)
 
         return all_detections
