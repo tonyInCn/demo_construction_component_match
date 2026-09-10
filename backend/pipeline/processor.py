@@ -421,51 +421,164 @@ class Processor:
     def _detect_crane(self, frame: np.ndarray) -> Optional[np.ndarray]:
         try:
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            h, w = frame.shape[:2]
 
-            yellow_lower = np.array([18, 80, 100])
+            yellow_lower = np.array([18, 60, 80])
             yellow_upper = np.array([38, 255, 255])
-            orange_lower = np.array([5, 100, 100])
+            orange_lower = np.array([5, 80, 80])
             orange_upper = np.array([18, 255, 255])
-            red_lower1 = np.array([0, 100, 100])
+            red_lower1 = np.array([0, 80, 80])
             red_upper1 = np.array([5, 255, 255])
-            red_lower2 = np.array([160, 100, 100])
+            red_lower2 = np.array([160, 80, 80])
             red_upper2 = np.array([180, 255, 255])
+
+            gray_lower = np.array([0, 0, 40])
+            gray_upper = np.array([180, 55, 230])
+            dark_gray_lower = np.array([0, 0, 20])
+            dark_gray_upper = np.array([180, 40, 100])
 
             mask_yellow = cv2.inRange(hsv, yellow_lower, yellow_upper)
             mask_orange = cv2.inRange(hsv, orange_lower, orange_upper)
             mask_red1 = cv2.inRange(hsv, red_lower1, red_upper1)
             mask_red2 = cv2.inRange(hsv, red_lower2, red_upper2)
+            mask_gray = cv2.inRange(hsv, gray_lower, gray_upper)
+            mask_dark = cv2.inRange(hsv, dark_gray_lower, dark_gray_upper)
 
             combined_mask = cv2.bitwise_or(mask_yellow, mask_orange)
             combined_mask = cv2.bitwise_or(combined_mask, mask_red1)
             combined_mask = cv2.bitwise_or(combined_mask, mask_red2)
+            combined_mask = cv2.bitwise_or(combined_mask, mask_gray)
 
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
             combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
             combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel, iterations=1)
 
             contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if not contours:
-                return None
+            min_area = (w * h) * 0.003
 
-            h, w = frame.shape[:2]
-            min_area = (w * h) * 0.01
-
+            best_contour = None
+            best_score = 0
             for contour in contours:
-                if cv2.contourArea(contour) > min_area:
-                    x, y, cw, ch = cv2.boundingRect(contour)
-                    pad_x = int(cw * 0.3)
-                    pad_y = int(ch * 0.3)
-                    work_region = np.array([
-                        [max(0, x - pad_x), max(0, y - pad_y)],
-                        [min(w, x + cw + pad_x), max(0, y - pad_y)],
-                        [min(w, x + cw + pad_x), min(h, y + ch + pad_y)],
-                        [max(0, x - pad_x), min(h, y + ch + pad_y)],
-                    ])
-                    return work_region
+                area = cv2.contourArea(contour)
+                if area < min_area:
+                    continue
+                x, y, cw, ch = cv2.boundingRect(contour)
+                ar = cw / max(ch, 1)
+                if 0.08 < ar < 12.0:
+                    score = area * (1.0 + abs(ar - 1.0) * 0.5)
+                    if score > best_score:
+                        best_score = score
+                        best_contour = contour
+
+            if best_contour is not None:
+                x, y, cw, ch = cv2.boundingRect(best_contour)
+                pad_x = int(cw * 0.4)
+                pad_y = int(ch * 0.4)
+                work_region = np.array([
+                    [max(0, x - pad_x), max(0, y - pad_y)],
+                    [min(w, x + cw + pad_x), max(0, y - pad_y)],
+                    [min(w, x + cw + pad_x), min(h, y + ch + pad_y)],
+                    [max(0, x - pad_x), min(h, y + ch + pad_y)],
+                ])
+                return work_region
+
+            logger.info("颜色检测未发现吊机，尝试垂直线条检测...")
+            line_wr = self._detect_crane_by_lines(frame)
+            if line_wr is not None:
+                return line_wr
+
+            logger.info("垂直线条检测未发现吊机，尝试GroundingDINO...")
+            if self.model_detector.grounding_dino is not None:
+                dino_wr = self._detect_crane_by_grounding(frame)
+                if dino_wr is not None:
+                    return dino_wr
+
         except Exception as e:
             logger.warning(f"吊机检测异常: {e}")
 
+        return None
+
+    def _detect_crane_by_lines(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        try:
+            h, w = frame.shape[:2]
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 50, 150)
+
+            lines = cv2.HoughLinesP(
+                edges, 1, np.pi / 180,
+                threshold=max(30, h // 8),
+                minLineLength=max(40, h // 15),
+                maxLineGap=15
+            )
+
+            if lines is None:
+                return None
+
+            vertical_lines = []
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                angle = abs(np.arctan2(abs(y2 - y1), abs(x2 - x1)) * 180.0 / np.pi)
+                length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+                if angle > 60 and length > h * 0.1:
+                    vertical_lines.append((x1, y1, x2, y2))
+
+            if len(vertical_lines) < 3:
+                return None
+
+            xs = []
+            ys_top = []
+            ys_bottom = []
+            for x1, y1, x2, y2 in vertical_lines:
+                xs.extend([x1, x2])
+                ys_top.append(min(y1, y2))
+                ys_bottom.append(max(y1, y2))
+
+            x_min, x_max = min(xs), max(xs)
+            y_min = min(ys_top)
+            y_max = max(ys_bottom)
+
+            cw = x_max - x_min
+            ch = y_max - y_min
+            if cw < 30 or ch < 50:
+                return None
+
+            area = cw * ch
+            if area < (w * h) * 0.005:
+                return None
+
+            pad_x = int(cw * 0.4)
+            pad_y = int(ch * 0.3)
+            work_region = np.array([
+                [max(0, x_min - pad_x), max(0, y_min - pad_y)],
+                [min(w, x_max + pad_x), max(0, y_min - pad_y)],
+                [min(w, x_max + pad_x), min(h, y_max + pad_y)],
+                [max(0, x_min - pad_x), min(h, y_max + pad_y)],
+            ])
+            return work_region
+        except Exception as e:
+            logger.warning(f"线条吊机检测异常: {e}")
+            return None
+
+    def _detect_crane_by_grounding(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        try:
+            results = self.model_detector._detect_grounding_dino(frame, frame.shape[1], frame.shape[0])
+            for r in results:
+                label = r.get("label", "").lower()
+                if "crane" in label or "tower" in label or "construction machinery" in label:
+                    x, y, bw, bh = r["bbox"]
+                    h, w = frame.shape[:2]
+                    pad_x = int(bw * 0.3)
+                    pad_y = int(bh * 0.3)
+                    work_region = np.array([
+                        [max(0, x - pad_x), max(0, y - pad_y)],
+                        [min(w, x + bw + pad_x), max(0, y - pad_y)],
+                        [min(w, x + bw + pad_x), min(h, y + bh + pad_y)],
+                        [max(0, x - pad_x), min(h, y + bh + pad_y)],
+                    ])
+                    logger.info(f"GroundingDINO 检测到吊机: {label} 置信度={r['confidence']:.3f}")
+                    return work_region
+        except Exception as e:
+            logger.warning(f"GroundingDINO吊机检测异常: {e}")
         return None
 
     def _annotate_frame(self, frame: np.ndarray, detections, frame_num: int) -> np.ndarray:
